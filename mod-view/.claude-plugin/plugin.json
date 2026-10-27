@@ -1,0 +1,5 @@
+{
+  "name": "knock-view",
+  "version": "0.1.0",
+  "description": "Companion to knock: hides the 📨 prompt row knock submits to open a turn for an incoming message"
+}

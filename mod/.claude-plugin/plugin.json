@@ -1,0 +1,6 @@
+{
+  "name": "knock",
+  "version": "0.1.0",
+  "description": "Chat with a friend from inside your Claude Code session: knock, they knock back, and what you type goes to them",
+  "types": "./types/index.d.ts"
+}

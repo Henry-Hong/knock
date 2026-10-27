@@ -1,0 +1,105 @@
+# knock 🚪
+
+Claude Code 세션 안에서 친구랑 채팅하는 플러그인이에요.
+
+평소처럼 Claude Code를 쓰다가 `/knock bob` 하고, bob도 `/knock alice` 하면 연결돼요. 그다음부터 입력하는 건 Claude 대신 bob한테 가고, bob의 답장은 Claude 답변 자리에 떠요. 모델을 부르지 않아서 토큰은 들지 않아요.
+
+```
+❯ ㅋㅋ ㅎㅇ
+⏺ 멀보노
+  니가먼데
+  반갑다고
+❯ ㅇㅋ
+```
+
+## 설치
+
+터미널의 Claude Code 프롬프트에서:
+
+```
+/plugin install knock --marketplace Henry-Hong/knock
+/plugin install knock-view --marketplace Henry-Hong/knock
+```
+
+셸에서:
+
+```sh
+claude plugin install knock --marketplace Henry-Hong/knock
+claude plugin install knock-view --marketplace Henry-Hong/knock
+```
+
+- 처음엔 `Add marketplace?`가 떠요. `y`를 누르고 범위(user)를 고르면 돼요.
+- 이 레포는 private이에요. 레포에 초대받은 GitHub 계정이 있어야 하고, 그 컴퓨터에 GitHub 인증이 돼 있어야 해요. `gh auth login` 다음에 `gh auth setup-git`을 하거나 SSH 키를 쓰면 돼요. 설치할 때 인증을 따로 묻지 않아요.
+- `knock-view`는 메시지가 왔을 때 knock이 턴을 열려고 넣는 `📨` 줄을 가려요. 없어도 동작은 하지만 같이 까는 걸 추천해요.
+
+Claude Code 2.1.311에서 만들고 테스트했어요.
+
+## 사용법
+
+| 명령 | 하는 일 |
+| --- | --- |
+| `/knock-init <이름>` | 내 이름을 정해요. 처음 쓰는 이름이면 서버에 등록돼요. 이름은 영문 소문자·숫자·`_`·`-`로 2~20자예요. |
+| `/knock <이름>` | 친구한테 노크해요. 친구도 나한테 노크하면 연결돼요. |
+| `/knock` | 나한테 노크한 사람 목록을 봐요. |
+| `/knock-me` | 내 이름과 지금 누구랑 대화 중인지 봐요. |
+| `/knock-off` | 연결을 끊고 다시 Claude랑 대화해요. |
+
+1. 둘 다 `/knock-init`으로 이름을 정해요. 한 번만 하면 돼요.
+2. alice가 `/knock bob` 하면 bob 쪽에 `🚪 alice 님이 노크했어요`가 떠요.
+3. bob이 `/knock alice` 하면 연결돼요. 하단 상태줄에 `💬 bob ↔ alice`가 떠요.
+4. 이제 그냥 치면 친구한테 가요. 끝낼 땐 `/knock-off`.
+
+`/knock`을 한 창에서만 친구 메시지를 기다려요. 다른 Claude Code 창들은 평소처럼 쓰면 돼요.
+
+### 알아둘 것
+
+- **첫 메시지의 라벨**: 아무것도 안 하고 있을 때 친구 메시지가 오면 knock이 대신 턴을 열어요. 그때 Claude Code가 `› Prompt from the knock plugin` 라벨을 붙여요. 누가 턴을 시작했는지 보여 주는 표시라 플러그인이 지울 수 없어요. 그 뒤 메시지는 같은 턴에 쌓여서 라벨이 다시 안 떠요.
+- **스피너**: 연결된 동안 답장을 기다리느라 스피너가 계속 돌아요. "상대가 입력 중"이라고 보면 돼요.
+- **끝낼 땐 `/knock-off`**: Esc를 누르면 Claude Code가 `Interrupted`를 띄워요.
+- **이름**: 이름은 컴퓨터에 저장돼요. 이름이 하나뿐이면 새 창에서도 자동으로 그 이름을 써요. 여러 개면(테스트용 이름 등) 창마다 `/knock-init <이름>`으로 골라야 해요.
+- **한 이름은 한 창**: 같은 이름으로 다른 창에서 `/knock` 하면 연결이 그 창으로 넘어가요.
+- **Claude가 헷갈리지 않게**: 채팅이 끝나고 Claude한테 다시 말을 걸면, 아까 `⏺`로 뜬 건 친구가 쓴 거라고 Claude한테 알려 줘요.
+
+## 서버
+
+기본 서버는 `https://knock.everwish.workers.dev`예요. 다른 서버를 쓰려면 Claude Code를 띄울 때 `KNOCK_SERVER`로 주소를 넘기면 돼요.
+
+```sh
+KNOCK_SERVER=https://my-knock.example.workers.dev claude
+```
+
+서버는 `server/`에 있어요. Cloudflare Workers와 Durable Object 하나로 돌아가요.
+- 계정(이름과 토큰 해시)은 SQLite에 저장해요.
+- 누가 노크했고 누가 연결됐는지는 메모리에만 들고 있어요.
+- 메시지는 롱 폴링으로 전달하고 저장하지 않아요.
+
+### 직접 띄우기
+
+```sh
+cd server
+npm install
+npm run dev        # http://localhost:8787
+```
+
+```sh
+npx wrangler login
+npm run deploy     # https://knock.<내 workers.dev 서브도메인>.workers.dev
+```
+
+## 개발
+
+레포를 받아서 플러그인 폴더를 바로 물려 띄우면 돼요. 파일을 저장하면 다시 로드돼요.
+
+```sh
+cd server && npm install && npm run dev
+# 다른 터미널 두 개에서 (alice, bob)
+KNOCK_SERVER=http://localhost:8787 claude --plugin-dir ./mod --plugin-dir ./mod-view
+```
+
+```
+mod/        knock 플러그인: 명령, 메시지 송수신, 친구 답장을 Claude 답변 자리에 띄우기
+mod-view/   knock-view 플러그인: 📨 줄 가리기
+server/     릴레이 서버 (Cloudflare Workers + Hono + Durable Object)
+```
+
+`📨` 줄을 가리는 일을 `knock-view`가 따로 맡은 데는 이유가 있어요. 플러그인은 자기가 넣은 프롬프트 줄의 화면 그리기를 건드릴 수 없어요.

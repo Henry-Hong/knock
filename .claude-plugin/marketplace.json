@@ -1,0 +1,16 @@
+{
+  "name": "knock",
+  "owner": { "name": "Henry-Hong" },
+  "plugins": [
+    {
+      "name": "knock",
+      "source": "./mod",
+      "description": "Chat with a friend from inside your Claude Code session"
+    },
+    {
+      "name": "knock-view",
+      "source": "./mod-view",
+      "description": "Companion to knock: hides the 📨 row knock submits for an incoming message"
+    }
+  ]
+}
