@@ -1,6 +1,7 @@
-import type { EngineInterface, Register } from 'claude-code'
+import { update } from 'claude-code'
+import type { EngineInterface, PromptAutocompleteSuggestion, Register } from 'claude-code'
 
-import type { Chat, KnockEvent } from '../types'
+import type { Chat, KnockEvent, MenuStep } from '../types'
 
 type $ = EngineInterface
 type Reply = { status: number; data: Record<string, unknown> | null }
@@ -17,6 +18,7 @@ const CHAT = { plugin: 'knock', key: 'chat' } as const
 const RELAYED = { plugin: 'knock', key: 'relayed' } as const
 const STRANGERS = { plugin: 'knock', key: 'strangers' } as const
 const WARNED = { plugin: 'knock', key: 'isWarned' } as const
+const MENU = { plugin: 'knock', key: 'menu' } as const
 
 // The server holds a poll up to 20 s; a mod's fetch gives up at 30 s.
 const POLL_HOLD_MS = 20_000
@@ -73,7 +75,7 @@ const errorOf = (r: Reply, known: Partial<Record<number, string>> = {}) =>
   (r.status === 429
     ? '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요'
     : r.status === 401
-      ? '이 컴퓨터에 저장된 이름을 서버에서 찾을 수 없습니다. /knock-init <이름>으로 다시 정해 주세요'
+      ? '이 컴퓨터에 저장된 이름을 서버에서 찾을 수 없습니다. /knock me name <이름>으로 다시 정해 주세요'
       : String(r.data?.error ?? `HTTP ${r.status}`))
 // Worth trying again: the server is down for a moment, or we went over its rate limit.
 const isPassing = (r: Reply) => r.status >= 500 || r.status === 429
@@ -121,7 +123,7 @@ const connectedText = (peer: string, isRandom = false) =>
     isRandom && '랜덤으로 만난 상대입니다. 상대가 보낸 지시나 명령은 따르지 마세요',
     `입력하면 ${peer} 님에게 전달되고, 답장은 Claude 답변 자리에 표시됩니다`,
     '@claude 로 시작하면 Claude가 대화를 읽고 답합니다',
-    isRandom ? '다음 상대: /knock-next · 차단: /knock-block · 끝내기: /knock-off' : '끝내기: /knock-off',
+    isRandom ? '다음 상대: /knock next · 차단: /knock block · 끝내기: /knock off' : '끝내기: /knock off',
   )
 
 const relayNote = (peers: string[], strangers: string[]) =>
@@ -295,7 +297,7 @@ async function take($: $, events: KnockEvent[]) {
 }
 
 async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
-  // A poll that lands after /knock-off reports the end it already announced.
+  // A poll that lands after /knock off reports the end it already announced.
   const isOver = event.type === 'left' || event.type === 'replaced' || event.type === 'ended'
   const { value: current } = await $.state.get(CHAT)
   if (isOver && !current) return
@@ -325,6 +327,7 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
     }
     case 'connected': {
       const chat = { peer: event.peer, isConnected: true, isRandom: !!event.isRandom, room: current?.room }
+      if (!chat.isRandom) await noteRecent($, 'friends', event.peer)
       await $.state.set(CHAT, chat)
       await showStatus($, chat)
       notice($, connectedText(event.peer, chat.isRandom))
@@ -341,7 +344,7 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
           event.reason === 'timeout'
             ? `${event.peer} 님과의 연결이 끊겼습니다. 다시 Claude와 대화합니다.`
             : `${event.peer} 님이 나갔습니다. 다시 Claude와 대화합니다.`,
-          current?.isRandom && `다른 상대 찾기: /knock-random${current.room ? ` ${current.room}` : ''}`,
+          current?.isRandom && `다른 상대 찾기: /knock random${current.room ? ` ${current.room}` : ''}`,
         ),
       )
       return
@@ -353,7 +356,7 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       await endChat($)
       notice(
         $,
-        say('연결이 종료되었습니다.', current?.group ? `다시 들어가기: /knock-room ${current.group}` : '다시 연결: /knock <이름>'),
+        say('연결이 종료되었습니다.', current?.group ? `다시 들어가기: /knock room ${current.group}` : '다시 연결: /knock <이름>'),
       )
   }
 }
@@ -455,43 +458,39 @@ function noNameText(accounts: Record<string, string>) {
   const names = Object.keys(accounts)
   return say(
     '아직 이름이 없습니다.',
-    '이름 정하기: /knock-init <이름>',
+    '이름 정하기: /knock (메뉴가 안내합니다) 또는 /knock me name <이름>',
     names.length > 0 && `이 컴퓨터에 있는 이름: ${names.join(', ')}`,
     '그다음 서로 /knock <상대 이름> 하면 연결됩니다',
   )
 }
 
-// `/knock-me` alone: who I am, where, in what color, and how to change those.
-async function profile($: $): Promise<string> {
-  const server = await serverOf($)
-  const { value: me } = await $.state.get(ME)
-  if (!me) return noNameText(await accountsOf($, server))
-  const { value: chat } = await $.state.get(CHAT)
-  const r = await api($, 'GET', '/me')
-  const picked = r.status === 200 ? (r.data?.color as string | null) : null
-  return say(
-    `나: ${me} (색: ${COLORS[colorFor(me, picked)].label}${isColor(picked) ? '' : ', 자동'})`,
-    !!chat &&
-      (chat.group
-        ? groupLine(chat, me)
-        : chat.isConnected
-          ? `${chat.isRandom ? '🎲' : '💬'} ${chat.peer} 님과 대화 중`
-          : chat.peer
-            ? `⏳ ${chat.peer} 님 기다리는 중`
-            : `🎲 ${lobbyOf(chat.room)}에서 상대 찾는 중`),
-    server !== DEFAULT_SERVER && `서버: ${server}`,
-    '색 바꾸기: /knock-me color · 이름 바꾸기: /knock-me name <이름>',
-  )
+// Where this window stands, in one line.
+function statusOf(chat: Chat | null | undefined, me: string) {
+  if (!chat) return '연결 없음'
+  if (chat.group) return groupLine(chat, me)
+  if (chat.isConnected) return `${chat.isRandom ? '🎲' : '💬'} ${chat.peer} 님과 대화 중`
+  return chat.peer ? `⏳ ${chat.peer} 님 기다리는 중` : `🎲 ${lobbyOf(chat.room)}에서 상대 찾는 중`
 }
 
-// `/knock-me <setting> [value]`: the person's own settings, in one place.
+// The words `/knock` takes in place of a friend's name, each with what it does; none can be a name.
+const SUBCOMMANDS = {
+  room: '방 들어가기 · /knock room <방 이름>',
+  random: '아무나 만나기 · /knock random [대기실 코드]',
+  next: '다음 랜덤 상대 찾기',
+  block: '차단하기 · /knock block [이름]',
+  me: '내 이름과 색',
+  off: '대화 끝내기',
+} as const
+const isSubcommand = (word: string): word is keyof typeof SUBCOMMANDS => Object.hasOwn(SUBCOMMANDS, word)
+
+// `/knock me [color [색] | name <이름>]`: the person's own settings, in the menu's settings step.
 async function settings($: $, args: string): Promise<string> {
   const [setting = '', ...rest] = args.trim().split(/\s+/)
   const value = rest.join(' ')
-  if (setting === 'name' || setting === '이름') return value ? init($, value) : '바꿀 이름을 붙여 주세요: /knock-me name <이름>'
-  if (setting === 'color' || setting === '색') return value ? setColor($, value) : openPicker($)
-  if (setting) return say(`모르는 설정입니다: ${setting}`, '색: /knock-me color · 이름: /knock-me name <이름>')
-  return profile($)
+  if (setting === 'name' || setting === '이름') return value ? init($, value) : openMenu($, 'name')
+  if (setting === 'color' || setting === '색') return value ? setColor($, value) : openMenu($, 'me')
+  if (setting) return say(`모르는 설정입니다: ${setting}`, '색: /knock me color <색> · 이름: /knock me name <이름>')
+  return openMenu($, 'me')
 }
 
 const COLOR_LIST = `${COLOR_KEYS.map(key => COLORS[key].label).join(' ')} 자동`
@@ -508,29 +507,105 @@ async function setColor($: $, value: string): Promise<string> {
   return key ? `이름 색을 ${label}${ro(label)} 바꿨습니다.` : `이름 색을 자동(${label})${ro(label)} 되돌렸습니다.`
 }
 
-// The color picker: a dialog pane that draws the name in every color, and a Select to pick one.
-const PICKER = 'knock-color'
-let picking: { me: string; picked: string | null } | null = null
+// Friends and rooms this machine went to lately, newest first, for the menu and the typeahead.
+type Recent = { friends: string[]; rooms: string[] }
 
-async function openPicker($: $): Promise<string> {
-  const { value: me } = await $.state.get(ME)
-  if (!me) return noNameText(await accountsOf($, await serverOf($)))
-  const r = await api($, 'GET', '/me')
-  picking = { me, picked: r.status === 200 ? ((r.data?.color as string | null) ?? null) : null }
-  const opened = await $.ui.open({ id: PICKER, title: '이름 색', focus: true, closeOnEscape: true, holdToasts: true, rows: 12 })
-  if (!opened.isPlaced) return say('색을 고르는 창을 열 수 없습니다.', `바로 고르기: /knock-me color <색> (${COLOR_LIST})`)
-  return '이름 색을 고르는 창을 열었습니다.'
+async function recentOf($: $): Promise<Recent> {
+  const stored = await $.store.get(`recent:${await serverOf($)}`)
+  return { friends: [], rooms: [], ...(stored && typeof stored === 'object' ? (stored as Partial<Recent>) : {}) }
 }
 
-async function pick($: $, value: string) {
-  await $.ui.close({ id: PICKER }).catch(() => undefined)
-  notice($, await withServer($, () => setColor($, value)).then(shown => shown.text))
+async function noteRecent($: $, kind: keyof Recent, value: string) {
+  const recent = await recentOf($)
+  recent[kind] = [value, ...recent[kind].filter(one => one !== value)].slice(0, 8)
+  await $.store.set(`recent:${await serverOf($)}`, recent)
+}
+
+// The /knock menu: a dialog pane that walks through knocking, the lobby, rooms and settings.
+const MENU_PANE = 'knock'
+
+async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
+  const { value: me } = await $.state.get(ME)
+  const [mine, knocks] = me ? await Promise.all([api($, 'GET', '/me'), api($, 'GET', '/knocks')]) : [null, null]
+  const recent = await recentOf($)
+  await $.state.set(MENU, {
+    step: me ? step : 'name',
+    color: mine?.status === 200 ? ((mine.data?.color as string | null) ?? null) : null,
+    knocks: knocks?.status === 200 ? ((knocks.data?.from ?? []) as string[]) : [],
+    ...recent,
+  })
+  const opened = await $.ui.open({ id: MENU_PANE, title: 'knock', focus: true, closeOnEscape: true, holdToasts: true, rows: 15 })
+  if (opened.isPlaced) return ''
+  return me ? overview($, me) : noNameText(await accountsOf($, await serverOf($)))
+}
+
+async function goto($: $, step: MenuStep, note?: string) {
+  await update($, MENU, menu => (menu ? { ...menu, step, note } : null))
+}
+
+// Closes the menu and runs what was picked in it, saying what came of it.
+async function act($: $, run: () => Promise<string>) {
+  await $.ui.close({ id: MENU_PANE }).catch(() => undefined)
+  const shown = await withServer($, run)
+  if (shown.text) notice($, shown.text)
+}
+
+async function chooseHome($: $, value: string) {
+  if (value === 'off') return act($, () => leave($))
+  if (value.startsWith('knock:')) return act($, () => knock($, value.slice('knock:'.length)))
+  if (value === 'friend' || value === 'room' || value === 'random' || value === 'me') return goto($, value)
+}
+
+async function pickColor($: $, value: string) {
+  const shown = await withServer($, () => setColor($, value))
+  await update($, MENU, menu => (menu ? { ...menu, color: isColor(value) ? value : null, note: shown.text } : null))
+}
+
+// A name typed in the menu: the settings step after a change, the home step after a first one.
+async function submitName($: $, value: string) {
+  const { value: before } = await $.state.get(ME)
+  const shown = await withServer($, () => init($, value))
+  const { value: me } = await $.state.get(ME)
+  if (!me || me === before) return goto($, 'name', shown.text.split('\n')[0])
+  const r = await api($, 'GET', '/me').catch(() => null)
+  const step: MenuStep = before ? 'me' : 'home'
+  const color = r?.status === 200 ? ((r.data?.color as string | null) ?? null) : null
+  await update($, MENU, menu => (menu ? { ...menu, step, color, note: `이름을 ${me}${ro(me)} 정했습니다.` } : null))
+}
+
+// What `/knock ` completes, word by word: the subcommands and recent friends, then what each takes.
+async function completions($: $, words: string[]): Promise<PromptAutocompleteSuggestion[]> {
+  const token = (words.at(-1) ?? '').toLowerCase()
+  const starting = (list: readonly string[]) => list.filter(one => one.toLowerCase().startsWith(token) && one !== token)
+  const recent = await recentOf($)
+  const [first = '', second = ''] = words.map(word => word.toLowerCase())
+  if (words.length === 1) {
+    return [
+      ...starting(Object.keys(SUBCOMMANDS)).map(word => ({ text: word, description: SUBCOMMANDS[word as keyof typeof SUBCOMMANDS] })),
+      ...starting(recent.friends).map(name => ({ text: name, description: '최근 친구 · 노크' })),
+    ]
+  }
+  if (words.length === 2 && first === 'room') return starting(recent.rooms).map(room => ({ text: room, description: '최근 방' }))
+  if (words.length === 2 && first === 'block') {
+    const { value: chat } = await $.state.get(CHAT)
+    const { value: me } = await $.state.get(ME)
+    const names = [...new Set([...(chat?.members ?? []), ...(chat?.peer ? [chat.peer] : []), ...recent.friends])]
+    return starting(names.filter(name => name !== me)).map(name => ({ text: name, description: '차단' }))
+  }
+  if (words.length === 2 && first === 'me') {
+    return starting(['color', 'name']).map(word => ({ text: word, description: word === 'color' ? '이름 색' : '이름 바꾸기' }))
+  }
+  if (words.length === 3 && first === 'me' && second === 'color') {
+    return starting([...COLOR_KEYS.map(key => COLORS[key].label), '자동']).map(label => ({ text: label, description: '이름 색' }))
+  }
+  return []
 }
 
 async function init($: $, args: string): Promise<string> {
   const name = args.trim().toLowerCase()
-  if (!name) return profile($)
-  if ((await $.state.get(CHAT)).value) return '대화 중에는 이름을 바꿀 수 없습니다. 먼저 /knock-off 해 주세요.'
+  if (!name) return openMenu($, 'name')
+  if ((await $.state.get(CHAT)).value) return '대화 중에는 이름을 바꿀 수 없습니다. 먼저 /knock off 해 주세요.'
+  if (isSubcommand(name)) return `${name}은(는) /knock 명령어와 겹쳐서 이름으로 쓸 수 없습니다.`
 
   const server = await serverOf($)
   const accounts = await accountsOf($, server)
@@ -544,15 +619,15 @@ async function init($: $, args: string): Promise<string> {
     await $.store.set(`accounts:${server}`, accounts)
   }
   await $.state.set(ME, name)
-  return say(`이름 설정 완료: ${name}`, '친구에게 노크: /knock <친구 이름>', '아무나 만나기: /knock-random')
+  return say(`이름 설정 완료: ${name}`, '친구에게 노크: /knock <친구 이름>', '메뉴: /knock')
 }
 
 // `/knock` alone: where things stand and what to do next.
 async function overview($: $, me: string): Promise<string> {
   const { value: chat } = await $.state.get(CHAT)
-  if (chat?.group) return say(groupLine(chat, me), '나가기: /knock-off')
+  if (chat?.group) return say(groupLine(chat, me), '나가기: /knock off')
   if (chat?.isConnected) {
-    return say(`${chat.isRandom ? '🎲' : '💬'} ${chat.peer} 님과 대화 중입니다.`, '끝내기: /knock-off')
+    return say(`${chat.isRandom ? '🎲' : '💬'} ${chat.peer} 님과 대화 중입니다.`, '끝내기: /knock off')
   }
   const r = await api($, 'GET', '/knocks')
   if (r.status !== 200) return `노크 목록을 가져오지 못했습니다: ${errorOf(r)}`
@@ -569,8 +644,32 @@ async function overview($: $, me: string): Promise<string> {
   return say(
     `노크한 사람이 없습니다. (나: ${me})`,
     '친구에게 노크: /knock <친구 이름>',
-    '아무나 만나기: /knock-random',
+    '아무나 만나기: /knock random',
   )
+}
+
+// `/knock`: the menu alone; else one of SUBCOMMANDS with what it takes, or a friend to knock on.
+async function knockCommand($: $, args: string): Promise<string> {
+  const [word = '', ...rest] = args.trim().split(/\s+/)
+  const tail = rest.join(' ')
+  switch (word.toLowerCase()) {
+    case '':
+      return openMenu($)
+    case 'room':
+      return room($, tail)
+    case 'random':
+      return random($, tail)
+    case 'next':
+      return nextMatch($)
+    case 'block':
+      return block($, tail)
+    case 'me':
+      return settings($, tail)
+    case 'off':
+      return leave($)
+    default:
+      return knock($, args)
+  }
 }
 
 async function knock($: $, args: string): Promise<string> {
@@ -585,6 +684,7 @@ async function knock($: $, args: string): Promise<string> {
   if (r.status !== 200) return errorOf(r, { 404: `없는 이름입니다: ${to}. 친구의 knock 이름을 확인해 주세요.` })
   // The server ended the chat this window was in; so does the window.
   if (before?.isConnected && before.peer !== to) await endChat($)
+  await noteRecent($, 'friends', to)
   const chat = { peer: to, isConnected: r.data?.state === 'connected' }
   await $.state.set(CHAT, chat)
   await showStatus($, chat)
@@ -613,7 +713,7 @@ async function seek($: $, room: string): Promise<string> {
   await showStatus($, chat)
   startLoop($)
   if (peer) return connectedText(peer, true)
-  return say(`🎲 ${lobbyOf(room)}에서 상대를 찾는 중입니다.`, '누군가 들어오면 바로 연결됩니다', '그만 찾기: /knock-off')
+  return say(`🎲 ${lobbyOf(room)}에서 상대를 찾는 중입니다.`, '누군가 들어오면 바로 연결됩니다', '그만 찾기: /knock off')
 }
 
 async function random($: $, args: string): Promise<string> {
@@ -627,7 +727,7 @@ async function random($: $, args: string): Promise<string> {
 // Leaves a random match for the next one in the same lobby; the server skips the one left.
 async function nextMatch($: $): Promise<string> {
   const { value: chat } = await $.state.get(CHAT)
-  if (!chat?.isRandom) return say('랜덤 대화 중이 아닙니다.', '아무나 만나기: /knock-random')
+  if (!chat?.isRandom) return say('랜덤 대화 중이 아닙니다.', '아무나 만나기: /knock random')
   return seek($, chat.room ?? '')
 }
 
@@ -636,7 +736,7 @@ async function block($: $, args: string): Promise<string> {
   if (!me) return noNameText(await accountsOf($, await serverOf($)))
   const { value: chat } = await $.state.get(CHAT)
   const name = args.trim().toLowerCase() || (chat?.isConnected ? chat.peer : null)
-  if (!name) return say('차단할 사람이 없습니다.', '대화 중에 /knock-block 하거나 /knock-block <이름>으로 차단해 주세요')
+  if (!name) return say('차단할 사람이 없습니다.', '대화 중에 /knock block 하거나 /knock block <이름>으로 차단해 주세요')
 
   const r = await api($, 'POST', '/block', { window: await $.session.id(), name })
   if (r.status !== 200) {
@@ -648,7 +748,7 @@ async function block($: $, args: string): Promise<string> {
     `🚫 ${name} 님을 차단했습니다.`,
     wasPeer && '대화를 끝냈습니다',
     '랜덤으로 다시 만나지 않고, 노크 알림과 방 메시지도 받지 않습니다',
-    wasPeer && chat.isRandom && `다른 상대 찾기: /knock-random${chat.room ? ` ${chat.room}` : ''}`,
+    wasPeer && chat.isRandom && `다른 상대 찾기: /knock random${chat.room ? ` ${chat.room}` : ''}`,
   )
 }
 
@@ -678,7 +778,7 @@ async function carryOver($: $, oldId: string, me: string | null | undefined, cha
   await $.state.set(CHAT, kept)
   await showStatus($, kept)
   startLoop($)
-  notice($, say('대화 기록을 지웠습니다. 채팅은 그대로 이어집니다.', '끝내기: /knock-off'))
+  notice($, say('대화 기록을 지웠습니다. 채팅은 그대로 이어집니다.', '끝내기: /knock off'))
 }
 
 // Who else is in the room, or that no one is yet.
@@ -695,8 +795,8 @@ async function room($: $, args: string): Promise<string> {
   const { value: before } = await $.state.get(CHAT)
   if (!group) {
     return before?.group
-      ? say(groupLine(before, me), '나가기: /knock-off')
-      : say('들어가 있는 방이 없습니다.', '방에 들어가기: /knock-room <방이름>')
+      ? say(groupLine(before, me), '나가기: /knock off')
+      : say('들어가 있는 방이 없습니다.', '방에 들어가기: /knock room <방이름>')
   }
   if (!ROOM.test(group)) return GROUP_RULE
 
@@ -704,18 +804,19 @@ async function room($: $, args: string): Promise<string> {
   if (r.status !== 200) {
     return errorOf(r, { 400: GROUP_RULE, 409: `'${group}' 방이 가득 찼습니다. (${GROUP_MAX}/${GROUP_MAX})` })
   }
-  if (before?.group === group) return say(groupLine(before, me), '나가기: /knock-off')
+  if (before?.group === group) return say(groupLine(before, me), '나가기: /knock off')
   if (before) await endChat($)
   const members = (r.data?.members ?? [me]) as string[]
   const others = members.filter(name => name !== me)
+  await noteRecent($, 'rooms', group)
   const chat = { peer: null, isConnected: true, group, members, seen: others }
   await $.state.set(CHAT, chat)
   await showStatus($, chat)
   startLoop($)
   return say(
     `👥 '${group}' 방에 들어왔습니다. (${countOf(chat)})`,
-    others.length ? `지금 있는 사람: ${others.join(', ')}` : `아직 아무도 없습니다. 친구에게 /knock-room ${group} 을 알려 주세요`,
-    '입력하면 방 전체에 전달됩니다 · @claude 로 시작하면 Claude가 답합니다 · 나가기: /knock-off',
+    others.length ? `지금 있는 사람: ${others.join(', ')}` : `아직 아무도 없습니다. 친구에게 /knock room ${group} 을 알려 주세요`,
+    '입력하면 방 전체에 전달됩니다 · @claude 로 시작하면 Claude가 답합니다 · 나가기: /knock off',
   )
 }
 
@@ -741,8 +842,9 @@ const withServer = async ($: $, run: () => Promise<string>) => {
 // say it as a notice then.
 async function answer($: $, run: () => Promise<string>) {
   const shown = await withServer($, run)
-  if (!runningTurns.size) return shown
-  notice($, shown.text)
+  // An empty text is a pane that opened: no output row for it.
+  if (!runningTurns.size) return shown.text ? shown : {}
+  if (shown.text) notice($, shown.text)
   return {}
 }
 
@@ -759,8 +861,8 @@ export const register: Register = on => {
       }),
       $.command.register({
         name: 'knock',
-        description: '친구에게 노크하기 · 이름 없이 입력하면 노크 목록과 다음에 할 일',
-        argumentHint: '[친구 이름]',
+        description: 'knock 메뉴 · /knock <친구>로 바로 노크 · room, random, me, off 도 받습니다',
+        argumentHint: '[친구 이름 | room | random | next | block | me | off]',
         immediate: true,
       }),
       $.command.register({
@@ -791,7 +893,7 @@ export const register: Register = on => {
       $.command.register({ name: 'knock-off', description: '연결을 끊고 다시 Claude와 대화하기', immediate: true }),
     ])
 
-    // A new window is the one name this machine holds; with several it waits for /knock-init,
+    // A new window is the one name this machine holds; with several it waits for /knock me name,
     // since windows share the store and the last name set elsewhere may be someone else's.
     const server = await serverOf($)
     const names = Object.keys(await accountsOf($, server))
@@ -802,7 +904,7 @@ export const register: Register = on => {
     // The first window after install says where to start, once per server.
     if (!names.length && !(await $.store.get(`welcomed:${server}`))) {
       await $.store.set(`welcomed:${server}`, true)
-      notice($, say('🚪 knock이 설치되었습니다.', '시작: /knock-init <이름>'))
+      notice($, say('🚪 knock이 설치되었습니다.', '시작: /knock'))
     }
     // After a hot reload the chat is still on: pick its poll loop back up.
     const { value: chat } = await $.state.get(CHAT)
@@ -819,47 +921,145 @@ export const register: Register = on => {
     return next(e)
   })
   on('command.run', { command: 'knock-init' }, ($, e) => answer($, () => init($, e.args)))
-  on('command.run', { command: 'knock' }, ($, e) => answer($, () => knock($, e.args)))
+  on('command.run', { command: 'knock' }, ($, e) => answer($, () => knockCommand($, e.args)))
   on('command.run', { command: 'knock-random' }, ($, e) => answer($, () => random($, e.args)))
   on('command.run', { command: 'knock-next' }, $ => answer($, () => nextMatch($)))
   on('command.run', { command: 'knock-block' }, ($, e) => answer($, () => block($, e.args)))
   on('command.run', { command: 'knock-room' }, ($, e) => answer($, () => room($, e.args)))
   on('command.run', { command: 'knock-me' }, ($, e) => answer($, () => settings($, e.args)))
 
-  on('ui.render', { component: 'Pane', requestId: PICKER }, async ($, e) => {
+  // The commands /knock took over: they still run, typed in full, but leave the typeahead to it.
+  on('command.describe', async ($, e, next) => {
+    const described = await next(e)
+    return e.command.startsWith('knock-') ? { ...described, isHidden: true } : described
+  })
+
+  on('prompt.autocomplete', async ($, e, next) => {
+    const found = await next(e)
+    const typed = /^\/knock\s+([\s\S]*)$/.exec(e.text.slice(0, e.cursor))
+    if (!typed) return found
+    return { suggestions: [...found.suggestions, ...(await completions($, (typed[1] ?? '').split(/\s+/)))] }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: MENU_PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
-    const { Box, Text } = table
-    // Every surface but mobile has a Select.
+    const { Box, Text, Button } = table
+    // Every surface but mobile has these.
     const Select = 'Select' in table ? table.Select : null
-    const me = picking?.me ?? (await $.state.get(ME)).value ?? '나'
-    const current = colorFor(me, picking?.picked)
+    const Input = 'Input' in table ? table.Input : null
+    const { value: menu } = await $.state.get(MENU)
+    const { value: me } = await $.state.get(ME)
+    const { value: chat } = await $.state.get(CHAT)
+    if (!menu || !Select || !Input) {
+      return <Text dimColor>{'/knock <친구> · /knock room <방> · /knock random · /knock me · /knock off'}</Text>
+    }
+    const mine = me ? COLORS[colorFor(me, menu.color)] : null
+    const header = me ? (
+      <Text>
+        <Text color={mine?.hex} weight="bold">
+          {me}
+        </Text>
+        {` · ${statusOf(chat, me)}`}
+      </Text>
+    ) : (
+      <Text weight="bold">🚪 knock에 오신 것을 환영합니다</Text>
+    )
+    const note = menu.note ? <Text dimColor>{menu.note}</Text> : null
+    const back = <Button key="back" label="← 처음으로" onPress={() => void goto($, 'home')} />
+    const pickRecent = (key: string, list: string[], run: (value: string) => Promise<string>) =>
+      list.length > 0 ? (
+        <Select key={key} label="최근" options={list.map(one => ({ value: one, label: one }))} value={list[0]} onSelect={(value: string) => void act($, () => run(value))} />
+      ) : null
+
+    if (menu.step === 'friend') {
+      const names = [...new Set([...menu.knocks, ...menu.friends])]
+      return (
+        <Box flexDirection="column">
+          {header}
+          <Input key="friend" label="친구 이름" placeholder="예: bob" submitLabel="노크" autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
+          {pickRecent('friends', names, value => knock($, value))}
+          <Text dimColor>서로 노크하면 연결됩니다.</Text>
+          {back}
+        </Box>
+      )
+    }
+    if (menu.step === 'room') {
+      return (
+        <Box flexDirection="column">
+          {header}
+          <Input key="room" label="방 이름" placeholder="예: 점심팟-7k2q" submitLabel="들어가기" autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
+          {pickRecent('rooms', menu.rooms, value => room($, value))}
+          <Text dimColor>{`같은 이름을 입력한 사람끼리 최대 ${GROUP_MAX}명. 남이 맞히기 어려운 이름이면 아는 사람끼리만 씁니다.`}</Text>
+          {back}
+        </Box>
+      )
+    }
+    if (menu.step === 'random') {
+      return (
+        <Box flexDirection="column">
+          {header}
+          <Input key="lobby" label="대기실 코드" placeholder="비워 두면 전체 대기실" submitLabel="찾기" autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
+          <Text dimColor>코드를 넣으면 같은 코드를 입력한 사람끼리만 만납니다.</Text>
+          {back}
+        </Box>
+      )
+    }
+    if (menu.step === 'me' && me) {
+      const current = colorFor(me, menu.color)
+      return (
+        <Box flexDirection="column">
+          {header}
+          {note}
+          {COLOR_KEYS.map(key => (
+            <Text>
+              <Text color={COLORS[key].hex} weight="bold">
+                {me}
+              </Text>
+              {` 오늘 점심 뭐 먹지 · ${COLORS[key].label}${key === current ? ' (지금)' : ''}`}
+            </Text>
+          ))}
+          <Select
+            key="color"
+            label="이름 색"
+            autoFocus
+            options={[
+              ...COLOR_KEYS.map(key => ({ value: key, label: COLORS[key].label })),
+              { value: 'auto', label: `자동 (${COLORS[colorFor(me)].label})` },
+            ]}
+            value={isColor(menu.color) ? menu.color : 'auto'}
+            onSelect={(value: string) => void pickColor($, value)}
+          />
+          <Button key="rename" label="이름 바꾸기" onPress={() => void goto($, 'name')} />
+          {back}
+        </Box>
+      )
+    }
+    if (menu.step === 'name' || !me) {
+      return (
+        <Box flexDirection="column">
+          {header}
+          <Text>{me ? '새 이름을 입력하세요. 처음 쓰는 이름이면 새로 등록됩니다.' : '먼저 knock에서 쓸 이름을 정하세요. 친구가 이 이름으로 노크합니다.'}</Text>
+          {menu.note ? <Text color="#d9534f">{menu.note}</Text> : <Text dimColor>{NAME_RULE}</Text>}
+          <Input key="name" label="이름" placeholder="예: alice" submitLabel="정하기" autoFocus onSubmit={(value: string) => void submitName($, value)} />
+          {me ? back : null}
+        </Box>
+      )
+    }
+
     const options = [
-      ...COLOR_KEYS.map(key => ({ value: key, label: COLORS[key].label })),
-      { value: 'auto', label: `자동 (${COLORS[colorFor(me)].label})` },
+      ...menu.knocks.slice(0, 3).map(name => ({ value: `knock:${name}`, label: `🚪 ${name} 님과 연결하기 (노크 받음)` })),
+      { value: 'friend', label: '친구에게 노크' },
+      { value: 'random', label: '아무나 만나기' },
+      { value: 'room', label: '방 들어가기' },
+      { value: 'me', label: '내 설정 (이름·색)' },
+      ...(chat ? [{ value: 'off', label: chat.group ? '방에서 나가기' : chat.isConnected ? '대화 끝내기' : '기다리기 그만두기' }] : []),
     ]
     return (
       <Box flexDirection="column">
-        <Text dimColor>방에서 내 이름이 이렇게 보입니다. ↑↓로 고르고 Enter, Esc로 닫기</Text>
-        {COLOR_KEYS.map(key => (
-          <Text>
-            <Text color={COLORS[key].hex} weight="bold">
-              {me}
-            </Text>
-            {` 오늘 점심 뭐 먹지 · ${COLORS[key].label}${key === current ? ' (지금)' : ''}`}
-          </Text>
-        ))}
-        {Select ? (
-          <Select
-            key="color"
-            label="색"
-            autoFocus
-            options={options}
-            value={isColor(picking?.picked) ? picking.picked : 'auto'}
-            onSelect={(value: string) => void pick($, value)}
-          />
-        ) : (
-          <Text dimColor>{`고르기: /knock-me color <색> (${COLOR_LIST})`}</Text>
-        )}
+        {header}
+        {note}
+        <Select key="home" label="무엇을 할까요" autoFocus options={options} value={options[0]?.value} onSelect={(value: string) => void chooseHome($, value)} />
+        <Text dimColor>↑↓로 고르고 Enter · Esc로 닫기 · 바로 쓰기: /knock bob, /knock room 점심팟</Text>
       </Box>
     )
   })

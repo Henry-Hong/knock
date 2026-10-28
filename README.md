@@ -18,29 +18,31 @@ What you type goes to your friend, and their replies show up where Claude's answ
 
 ```
 /plugin install knock --marketplace Henry-Hong/knock
-/knock-init alice
-/knock bob
+/knock
 ```
 
 1. Install it in Claude Code. Answer `y` to `Add marketplace?`
-2. Pick your name
-3. Knock on your friend. Once they `/knock alice` back, you're connected 💬
+2. Type `/knock`. A menu opens and walks you through picking a name
+3. Pick **Knock on a friend** and type their name. Once they knock on you back, you're connected 💬
 
-`/knock-off` to leave. Lost? Type `/knock` and it tells you what to do next.
+Already know your way? `/knock bob` knocks on bob at once, and `/knock off` leaves.
 
 ## Commands
 
+`/knock` is the only command to remember. Alone it opens the menu; with a word after it, it does that right away. After `/knock `, start typing and the typeahead offers the words, your recent friends and rooms, and the colors.
+
 | Command | |
 | --- | --- |
+| `/knock` | The menu: knock on a friend, meet someone at random, join a room, your settings |
 | `/knock <name>` | Knock on a friend. Knock on each other to connect |
-| `/knock` | Your status, who knocked, what to do next |
-| `/knock-init <name>` | Pick your name |
-| `/knock-random [code]` | Meet someone at random. With a code, only people who used the same code |
-| `/knock-next` | Leave this random match and find the next one |
-| `/knock-room [room]` | Join a group room, up to 8 people. Alone, it shows who's in your room |
-| `/knock-block [name]` | Block the person you're chatting with, or a name |
-| `/knock-me` | Your name, color and chat, and your settings: `color` picks your name's color, `name <name>` switches names |
-| `/knock-off` | Leave the chat or room (or stop looking) and go back to Claude |
+| `/knock random [code]` | Meet someone at random. With a code, only people who used the same code |
+| `/knock next` | Leave this random match and find the next one |
+| `/knock room [room]` | Join a group room, up to 8 people. Alone, it shows who's in your room |
+| `/knock block [name]` | Block the person you're chatting with, or a name |
+| `/knock me` | Your settings: your name's color (with a preview) and your name. `/knock me color blue` and `/knock me name <name>` do it directly |
+| `/knock off` | Leave the chat or room (or stop looking) and go back to Claude |
+
+The older `/knock-room`-style commands still work, out of the typeahead.
 
 ## Good to know
 
@@ -76,7 +78,7 @@ A knock notice (🚪) shows up only in a **window that's waiting on a knock**: o
 
 - **`› Prompt from the knock plugin`**: a label Claude Code adds when a message arrives while you're idle and knock opens a turn for it. Plugins can't remove it. Later messages land in the same turn, so it shows up once.
 - **Status line**: `💬 alice ↔ bob` means connected. `⏳ alice → bob` means you're waiting for them to knock back. `🎲` marks a random match, or a lobby you're waiting in. `👥 alice · lunch 3/8` means you're in a room with 3 people.
-- **Esc**: interrupts the chat turn, and Claude Code shows `Interrupted`. Use `/knock-off` to leave cleanly.
+- **Esc**: interrupts the chat turn, and Claude Code shows `Interrupted`. Use `/knock off` to leave cleanly.
 - **`/clear` in a chat**: clears the screen and Claude's history, and the chat goes on. knock keeps your name and your chat or room.
 
 </details>
@@ -87,7 +89,7 @@ A knock notice (🚪) shows up only in a **window that's waiting on a knock**: o
 - 2–20 characters: lowercase letters, digits, `_`, `-`. First come, first served.
 - Your name is saved on this computer.
   - If it's the only one, new windows pick it up automatically.
-  - If there are several, pick one per window with `/knock-init <name>`.
+  - If there are several, pick one per window with `/knock me name <name>`.
 - You can't use the same name from another computer.
 - Knocking from a second window with the same name moves the chat to that window.
 
@@ -103,33 +105,33 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 <details>
 <summary><b>Random matching</b></summary>
 
-`/knock-random` puts you in a lobby. If someone is already waiting there, you're connected right away. If not, you wait for the next person who comes in.
+`/knock random` puts you in a lobby. If someone is already waiting there, you're connected right away. If not, you wait for the next person who comes in.
 
-- `/knock-random` alone is the open lobby, for everyone. `/knock-random <code>` is a lobby of its own, so only people who type the same code meet. Use one for a team or a community.
+- `/knock random` alone is the open lobby, for everyone. `/knock random <code>` is a lobby of its own, so only people who type the same code meet. Use one for a team or a community.
 - The person who has waited longest gets matched first.
-- `/knock-next` moves on. You won't get the person you just left again right away.
-- `/knock-block` blocks the person you're chatting with and ends the chat. You never meet them at random again, and their knocks don't notify you. If you knock on each other on purpose, you still connect.
+- `/knock next` moves on. You won't get the person you just left again right away.
+- `/knock block` blocks the person you're chatting with and ends the chat. You never meet them at random again, and their knocks don't notify you. If you knock on each other on purpose, you still connect.
 
 </details>
 
 <details>
 <summary><b>Group rooms</b></summary>
 
-`/knock-room lunch` takes you into the room `lunch`, and makes it if nobody's there. Anyone who types the same name joins you, up to 8 people.
+`/knock room lunch` takes you into the room `lunch`, and makes it if nobody's there. Anyone who types the same name joins you, up to 8 people.
 
 | Time | alice's window | bob's window |
 | --- | --- | --- |
-| 12:01 | `❯ /knock-room lunch` | |
-| 12:02 | `⏺ knock: 👋 bob … (2/8)` (bob joined) | `❯ /knock-room lunch` |
+| 12:01 | `❯ /knock room lunch` | |
+| 12:02 | `⏺ knock: 👋 bob … (2/8)` (bob joined) | `❯ /knock room lunch` |
 | 12:02 | | `❯ ramen?` |
 | 12:02 | `⏺ bob ramen?` | |
 
 - Others' messages land where Claude's answers go, one per line, each led by its sender's name in bold and in their color.
-- `/knock-me color` opens a picker that shows your name in each of 8 colors; `/knock-me color blue` (or `파랑`) sets one directly. Until you pick, your name gets a color of its own.
-- You see who comes and goes. `/knock-room` alone shows who's in the room.
+- `/knock me color` opens a picker that shows your name in each of 8 colors; `/knock me color blue` (or `파랑`) sets one directly. Until you pick, your name gets a color of its own.
+- You see who comes and goes. `/knock room` alone shows who's in the room.
 - The server doesn't store messages, so you only see what's said after you join.
 - The room goes away when the last person leaves.
-- `/knock-block <name>` stops that person's messages reaching you, and yours reaching them.
+- `/knock block <name>` stops that person's messages reaching you, and yours reaching them.
 - **A room's name isn't a password.** Anyone who guesses it can come in. For a private room, pick a name nobody would guess, like `lunch-7k2q`.
 
 </details>
