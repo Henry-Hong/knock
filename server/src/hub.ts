@@ -7,6 +7,8 @@ import { DurableObject } from 'cloudflare:workers'
 const POLL_HOLD_MS = 20_000
 // A window that has not polled for this long is treated as closed.
 const STALE_MS = 45_000
+// A window between two polls is still listening for this long.
+const LISTENING_GAP_MS = 5_000
 const MAX_TEXT = 4_000
 const NAME = /^[a-z0-9][a-z0-9_-]{1,19}$/
 
@@ -60,7 +62,11 @@ export class Hub extends DurableObject<Env> {
     return ok({ name, token })
   }
 
-  async knock(token: string, window: string, to: string): Promise<Result<{ state: 'waiting' | 'connected'; peer: string }>> {
+  async knock(
+    token: string,
+    window: string,
+    to: string,
+  ): Promise<Result<{ state: 'connected'; peer: string } | { state: 'waiting'; peer: string; isNotified: boolean }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     if (to === me) return fail(400, 'you cannot knock on yourself')
@@ -79,8 +85,9 @@ export class Hub extends DurableObject<Env> {
       this.push(to, { type: 'connected', peer: me })
       return ok({ state: 'connected', peer: to })
     }
+    // Only a window that polls hears it; otherwise the knock waits for `to` to look with /knocks.
     this.push(to, { type: 'knocked', from: me })
-    return ok({ state: 'waiting', peer: to })
+    return ok({ state: 'waiting', peer: to, isNotified: this.isListening(to) })
   }
 
   async knocks(token: string): Promise<Result<{ from: string[] }>> {
@@ -178,6 +185,12 @@ export class Hub extends DurableObject<Env> {
     }
     live.peer = null
     live.target = null
+  }
+
+  // A poll is held, or one just ended and the next is on its way.
+  private isListening(name: string): boolean {
+    const live = this.live.get(name)
+    return !!live && (!!live.waiter || Date.now() - live.seenAt < LISTENING_GAP_MS)
   }
 
   private push(name: string, event: KnockEvent) {
