@@ -18,6 +18,7 @@ export type KnockEvent =
   | { type: 'knocked'; from: string }
   | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string; isClaude?: true }
   | { type: 'left'; peer: string; reason: 'left' | 'timeout' }
+  | { type: 'picture'; from: string; png: string; at: number; group?: string }
   | { type: 'joined'; name: string; count: number }
   | { type: 'departed'; name: string; count: number; reason: 'left' | 'timeout' }
   | { type: 'replaced' }
@@ -48,6 +49,8 @@ declare module 'claude-code' {
       strangers: string[]
       isWarned: boolean
       menu: Menu | null
+      // The picture viewer: which picture shows (0 the newest), and a count bumped as pictures come.
+      viewer: { index: number; seq: number; isSharp?: boolean } | null
     }
   }
 }

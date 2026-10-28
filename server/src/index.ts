@@ -72,6 +72,11 @@ app.post('/send', perUser, async c => {
   return reply(c, await hub(c).send(token(c), str(window), str(text), claude === true))
 })
 
+app.post('/pic', perUser, async c => {
+  const { window, png } = await body(c)
+  return reply(c, await hub(c).picture(token(c), str(window), str(png)))
+})
+
 app.post('/leave', perUser, async c => {
   const { window } = await body(c)
   return reply(c, await hub(c).leave(token(c), str(window)))

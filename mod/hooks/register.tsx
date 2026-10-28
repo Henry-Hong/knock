@@ -19,6 +19,7 @@ const RELAYED = { plugin: 'knock', key: 'relayed' } as const
 const STRANGERS = { plugin: 'knock', key: 'strangers' } as const
 const WARNED = { plugin: 'knock', key: 'isWarned' } as const
 const MENU = { plugin: 'knock', key: 'menu' } as const
+const VIEWER = { plugin: 'knock', key: 'viewer' } as const
 
 // What knock says things in: English unless the person picked Korean. Kept for the machine in
 // $.store, read when a window starts and before each command, so every window follows a change.
@@ -48,6 +49,9 @@ let isInboxTurnQueued = false // a 📨 turn is already on its way to show the i
 let inbox: Message[] = []
 let recent: { from: string; text: string }[] = [] // the chat's last lines, which @claude reads
 let isAsking = false // an @claude question is out
+// The pictures sent and received lately, newest first: their bytes stay here, out of $.state.
+type Picture = { from: string; png: string; at: number; width: number; height: number; isStranger: boolean; thumb?: Thumb | null }
+let pictures: Picture[] = []
 let stopWaiting: (() => void) | null = null
 const pendingTurns: string[] = [] // prompt texts whose turns the peer answers
 const chatTurns = new Set<string>() // every step of these turns is the peer's, until the turn completes
@@ -312,8 +316,16 @@ async function take($: $, events: KnockEvent[]) {
       const m = { ...event, text: clean(event.text) }
       remember(m.isClaude ? 'claude' : m.from, m.text)
       inbox.push(m)
-    }
-    else await onEvent($, event)
+    } else if (event.type === 'picture') {
+      const { value: chat } = await $.state.get(CHAT)
+      const isStranger = !!chat?.isRandom
+      await keepPicture($, { from: event.from, png: event.png, at: event.at, isStranger })
+      const text = isStranger
+        ? t("📷 sent a picture · a stranger's: see it only if you trust them: /knock pic", '📷 사진을 보냈습니다 · 모르는 사람의 사진이니 믿을 때만 보세요: /knock pic')
+        : t('📷 sent a picture · see it: /knock pic', '📷 사진을 보냈습니다 · 보기: /knock pic')
+      remember(event.from, '(a picture)')
+      inbox.push({ type: 'message', from: event.from, text, at: event.at, group: event.group })
+    } else await onEvent($, event)
   }
 }
 
@@ -508,6 +520,7 @@ const SUBCOMMANDS = {
   block: () => t('Block someone · /knock block [name]', '차단하기 · /knock block [이름]'),
   me: () => t('Your name, color and language', '내 이름, 색, 언어'),
   off: () => t('End the chat', '대화 끝내기'),
+  pic: () => t('Send a PNG picture · /knock pic <path>; alone, see the pictures', 'PNG 사진 보내기 · /knock pic <경로>, 그냥 입력하면 받은 사진 보기'),
 } as const
 const isSubcommand = (word: string): word is keyof typeof SUBCOMMANDS => Object.hasOwn(SUBCOMMANDS, word)
 
@@ -567,6 +580,345 @@ async function noteRecent($: $, kind: keyof Recent, value: string) {
   const recent = await recentOf($)
   recent[kind] = [value, ...recent[kind].filter(one => one !== value)].slice(0, 8)
   await $.store.set(`recent:${await serverOf($)}`, recent)
+}
+
+// A picture is a whole PNG, base64, up to 4 MiB decoded (what $.fs.read reads at once), as the server
+// takes it. The sharp view draws one up to 2 MiB; the block view, any size.
+const PNG_HEAD = 'iVBORw0KGgo'
+const PNG_MAX = Math.ceil((4 * 1024 * 1024) / 3) * 4
+const SHARP_MAX = Math.ceil((2 * 1024 * 1024) / 3) * 4
+const PICTURE_PANE = 'knock-pic'
+
+// PNG decoding for the knock mod, which has no DecompressionStream: a zlib inflate (after zlib's
+// own puff.c), the scanline filters, and a box-filtered shrink to what a Raster can show.
+
+type Huffman = { count: Uint16Array; symbol: Uint16Array }
+
+const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+const DISTANCE_BASE = [
+  1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193,
+  12289, 16385, 24577,
+]
+const DISTANCE_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+const CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+
+function huffman(lengths: ArrayLike<number>): Huffman {
+  const count = new Uint16Array(16)
+  const symbol = new Uint16Array(lengths.length)
+  for (let i = 0; i < lengths.length; i++) count[lengths[i]!]!++
+  const offsets = new Uint16Array(16)
+  for (let len = 1; len < 15; len++) offsets[len + 1] = offsets[len]! + count[len]!
+  for (let i = 0; i < lengths.length; i++) if (lengths[i]) symbol[offsets[lengths[i]!]!++] = i
+  return { count, symbol }
+}
+
+const FIXED_LENGTHS = huffman(Array.from({ length: 288 }, (_, i) => (i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8)))
+const FIXED_DISTANCES = huffman(new Array(30).fill(5))
+
+// A zlib stream's data: stored, fixed and dynamic Huffman blocks. Throws on a stream it cannot read.
+function inflate(data: Uint8Array, sizeHint: number): Uint8Array {
+  let pos = 2 // past the zlib header
+  let bitBuffer = 0
+  let bitCount = 0
+  let out = new Uint8Array(Math.max(sizeHint, 1024))
+  let size = 0
+  const grow = (more: number) => {
+    if (size + more <= out.length) return
+    const bigger = new Uint8Array(Math.max(out.length * 2, size + more))
+    bigger.set(out.subarray(0, size))
+    out = bigger
+  }
+  const bits = (need: number) => {
+    while (bitCount < need) {
+      if (pos >= data.length) throw new Error('png: data ends early')
+      bitBuffer |= data[pos++]! << bitCount
+      bitCount += 8
+    }
+    const value = bitBuffer & ((1 << need) - 1)
+    bitBuffer >>>= need
+    bitCount -= need
+    return value
+  }
+  const decode = (h: Huffman) => {
+    let code = 0
+    let first = 0
+    let index = 0
+    for (let len = 1; len < 16; len++) {
+      code |= bits(1)
+      const count = h.count[len]!
+      if (code - count < first) return h.symbol[index + (code - first)]!
+      index += count
+      first = (first + count) << 1
+      code <<= 1
+    }
+    throw new Error('png: bad Huffman code')
+  }
+  for (let isLast = 0; !isLast; ) {
+    isLast = bits(1)
+    const type = bits(2)
+    if (type === 0) {
+      bitBuffer = 0
+      bitCount = 0
+      const length = data[pos]! | (data[pos + 1]! << 8)
+      pos += 4
+      grow(length)
+      out.set(data.subarray(pos, pos + length), size)
+      size += length
+      pos += length
+      continue
+    }
+    let lengths = FIXED_LENGTHS
+    let distances = FIXED_DISTANCES
+    if (type === 2) {
+      const literalCount = bits(5) + 257
+      const distanceCount = bits(5) + 1
+      const codeCount = bits(4) + 4
+      const codeLengths = new Uint8Array(19)
+      for (let i = 0; i < codeCount; i++) codeLengths[CODE_LENGTH_ORDER[i]!] = bits(3)
+      const codes = huffman(codeLengths)
+      const all = new Uint8Array(literalCount + distanceCount)
+      for (let i = 0; i < all.length; ) {
+        const symbol = decode(codes)
+        if (symbol < 16) all[i++] = symbol
+        else {
+          const repeat = symbol === 16 ? 3 + bits(2) : symbol === 17 ? 3 + bits(3) : 11 + bits(7)
+          const value = symbol === 16 ? all[i - 1]! : 0
+          all.fill(value, i, i + repeat)
+          i += repeat
+        }
+      }
+      lengths = huffman(all.subarray(0, literalCount))
+      distances = huffman(all.subarray(literalCount))
+    } else if (type !== 1) throw new Error('png: bad block type')
+    for (;;) {
+      const symbol = decode(lengths)
+      if (symbol < 256) {
+        grow(1)
+        out[size++] = symbol
+      } else if (symbol === 256) break
+      else {
+        const length = LENGTH_BASE[symbol - 257]! + bits(LENGTH_EXTRA[symbol - 257]!)
+        const which = decode(distances)
+        const distance = DISTANCE_BASE[which]! + bits(DISTANCE_EXTRA[which]!)
+        grow(length)
+        for (let i = 0; i < length; i++, size++) out[size] = out[size - distance]!
+      }
+    }
+  }
+  return out.subarray(0, size)
+}
+
+// A picture shrunk to at most `maxWidth` pixels across, RGB, transparency laid over a dark gray.
+type Thumb = { width: number; height: number; rgb: Uint8Array }
+
+// Decodes a whole PNG (base64) into a Thumb, or null for one it cannot read (interlaced, broken).
+function thumbOf(png: string, maxWidth: number): Thumb | null {
+  try {
+    const bytes = Uint8Array.from(atob(png), ch => ch.charCodeAt(0))
+    const view = new DataView(bytes.buffer)
+    let width = 0
+    let height = 0
+    let depth = 0
+    let type = 0
+    let palette = new Uint8Array(0)
+    let alphas = new Uint8Array(0)
+    const parts: Uint8Array[] = []
+    for (let pos = 8; pos + 8 <= bytes.length; ) {
+      const length = view.getUint32(pos)
+      const name = String.fromCharCode(bytes[pos + 4]!, bytes[pos + 5]!, bytes[pos + 6]!, bytes[pos + 7]!)
+      const body = bytes.subarray(pos + 8, pos + 8 + length)
+      if (name === 'IHDR') {
+        width = view.getUint32(pos + 8)
+        height = view.getUint32(pos + 12)
+        depth = body[8]!
+        type = body[9]!
+        if (body[12]) return null // interlaced
+      } else if (name === 'PLTE') palette = body
+      else if (name === 'tRNS') alphas = body
+      else if (name === 'IDAT') parts.push(body)
+      else if (name === 'IEND') break
+      pos += 12 + length
+    }
+    const channels = ({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 } as Record<number, number>)[type]
+    if (!channels || !width || !height) return null
+    const pixelBits = channels * depth
+    const stride = Math.ceil((width * pixelBits) / 8)
+    const step = Math.max(1, pixelBits >> 3)
+    const zipped = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0))
+    parts.reduce((at, part) => (zipped.set(part, at), at + part.length), 0)
+    const raw = inflate(zipped, (stride + 1) * height)
+
+    // Undo each row's filter in place, against the row above.
+    const rows = new Uint8Array(stride * height)
+    for (let y = 0; y < height; y++) {
+      const filter = raw[y * (stride + 1)]!
+      const from = y * (stride + 1) + 1
+      const at = y * stride
+      for (let x = 0; x < stride; x++) {
+        const a = x >= step ? rows[at + x - step]! : 0
+        const b = y ? rows[at - stride + x]! : 0
+        const c = x >= step && y ? rows[at - stride + x - step]! : 0
+        let value = raw[from + x]!
+        if (filter === 1) value += a
+        else if (filter === 2) value += b
+        else if (filter === 3) value += (a + b) >> 1
+        else if (filter === 4) {
+          const p = a + b - c
+          const pa = Math.abs(p - a)
+          const pb = Math.abs(p - b)
+          const pc = Math.abs(p - c)
+          value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c
+        }
+        rows[at + x] = value
+      }
+    }
+
+    // One channel of one pixel as 0-255, whatever the bit depth.
+    const top = (1 << Math.min(depth, 8)) - 1
+    const sample = (x: number, y: number, channel: number) => {
+      const at = y * stride
+      if (depth === 16) return rows[at + (x * channels + channel) * 2]!
+      if (depth === 8) return rows[at + x * channels + channel]!
+      const bit = (x * channels + channel) * depth
+      const value = (rows[at + (bit >> 3)]! >> (8 - depth - (bit & 7))) & top
+      return type === 3 ? value : Math.round((value * 255) / top)
+    }
+    const pixel = (x: number, y: number): [number, number, number, number] => {
+      if (type === 3) {
+        const i = sample(x, y, 0)
+        return [palette[i * 3] ?? 0, palette[i * 3 + 1] ?? 0, palette[i * 3 + 2] ?? 0, alphas[i] ?? 255]
+      }
+      if (type === 0) {
+        const v = sample(x, y, 0)
+        return [v, v, v, 255]
+      }
+      if (type === 4) {
+        const v = sample(x, y, 0)
+        return [v, v, v, sample(x, y, 1)]
+      }
+      return [sample(x, y, 0), sample(x, y, 1), sample(x, y, 2), type === 6 ? sample(x, y, 3) : 255]
+    }
+
+    // Shrink by averaging each output pixel's box of input pixels.
+    const thumbWidth = Math.min(width, maxWidth)
+    const thumbHeight = Math.max(1, Math.round((height * thumbWidth) / width))
+    const sums = new Float64Array(thumbWidth * thumbHeight * 4)
+    for (let y = 0; y < height; y++) {
+      const ty = Math.min(thumbHeight - 1, Math.floor((y * thumbHeight) / height))
+      for (let x = 0; x < width; x++) {
+        const tx = Math.min(thumbWidth - 1, Math.floor((x * thumbWidth) / width))
+        const [r, g, b, alpha] = pixel(x, y)
+        const at = (ty * thumbWidth + tx) * 4
+        sums[at] = sums[at]! + (r * alpha + 30 * (255 - alpha)) / 255
+        sums[at + 1] = sums[at + 1]! + (g * alpha + 30 * (255 - alpha)) / 255
+        sums[at + 2] = sums[at + 2]! + (b * alpha + 30 * (255 - alpha)) / 255
+        sums[at + 3] = sums[at + 3]! + 1
+      }
+    }
+    const rgb = new Uint8Array(thumbWidth * thumbHeight * 3)
+    for (let i = 0; i < thumbWidth * thumbHeight; i++) {
+      const n = sums[i * 4 + 3] || 1
+      for (let c = 0; c < 3; c++) rgb[i * 3 + c] = Math.round(sums[i * 4 + c]! / n)
+    }
+    return { width: thumbWidth, height: thumbHeight, rgb }
+  } catch {
+    return null
+  }
+}
+
+// Base64 of bytes, without btoa: the cells of a Raster run past what one String.fromCharCode takes.
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+function base64Of(bytes: Uint8Array) {
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i]! << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0)
+    out += BASE64[(n >> 18) & 63]! + BASE64[(n >> 12) & 63]!
+    out += i + 1 < bytes.length ? BASE64[(n >> 6) & 63]! : '='
+    out += i + 2 < bytes.length ? BASE64[n & 63]! : '='
+  }
+  return out
+}
+
+// A picture as Raster cells, columns x rows: each cell an upper half block whose foreground is the
+// pixel above and background the one below, so a cell holds two square-ish pixels.
+function cellsOf(thumb: Thumb, columns: number, rows: number) {
+  const words = new DataView(new ArrayBuffer(columns * rows * 12))
+  const colorAt = (x: number, y: number) => {
+    const sx = Math.min(thumb.width - 1, Math.floor(((x + 0.5) * thumb.width) / columns))
+    const sy = Math.min(thumb.height - 1, Math.floor(((y + 0.5) * thumb.height) / (rows * 2)))
+    const at = (sy * thumb.width + sx) * 3
+    return (thumb.rgb[at]! << 16) | (thumb.rgb[at + 1]! << 8) | thumb.rgb[at + 2]!
+  }
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < columns; x++) {
+      const at = (y * columns + x) * 12
+      words.setUint32(at, 0x2580, true)
+      words.setUint32(at + 4, colorAt(x, y * 2), true)
+      words.setUint32(at + 8, colorAt(x, y * 2 + 1), true)
+    }
+  }
+  return base64Of(new Uint8Array(words.buffer))
+}
+
+// A PNG's size, from its IHDR: bytes 16-23 of the file, the first 32 base64 characters' 24 bytes.
+function sizeOf(png: string): { width: number; height: number } {
+  const head = Uint8Array.from(atob(png.slice(0, 32)), ch => ch.charCodeAt(0))
+  const at = (i: number) => ((head[i]! << 24) | (head[i + 1]! << 16) | (head[i + 2]! << 8) | head[i + 3]!) >>> 0
+  return { width: at(16) || 1, height: at(20) || 1 }
+}
+
+async function keepPicture($: $, picture: Omit<Picture, 'width' | 'height'>) {
+  pictures = [{ ...picture, ...sizeOf(picture.png) }, ...pictures].slice(0, 10)
+  // A viewer open on the newest moves to this one; one on an older keeps its picture.
+  await update($, VIEWER, viewer => (viewer ? { index: viewer.index ? viewer.index + 1 : 0, seq: viewer.seq + 1 } : null))
+}
+
+// A path as typed or dropped in: quotes, backslash escapes (a dragged file's spaces) and ~ undone.
+async function pathOf($: $, typed: string) {
+  let path = typed.trim().replace(/^(['"])(.*)\1$/, '$2').replace(/\\(.)/g, '$1')
+  if (path === '~' || path.startsWith('~/')) path = `${(await $.env.get('HOME')) ?? ''}${path.slice(1)}`
+  return path
+}
+
+// `/knock pic <path>`: sends a PNG to the chat or room; `/knock pic` alone shows the pictures.
+async function picture($: $, args: string): Promise<string> {
+  if (!args.trim()) return openViewer($)
+  const { value: chat } = await $.state.get(CHAT)
+  if (!chat?.isConnected) return t('Pictures go to a chat or a room: connect first.', '사진은 채팅이나 방으로 보냅니다. 먼저 연결해 주세요.')
+  const path = await pathOf($, args)
+  let png: string
+  try {
+    png = (await $.fs.read(path, { as: 'bytes' })).base64
+  } catch {
+    return t(`Could not read ${path}`, `파일을 읽지 못했습니다: ${path}`)
+  }
+  if (!png.startsWith(PNG_HEAD)) return t('Only PNG pictures for now. A screenshot is one.', '지금은 PNG만 보낼 수 있습니다. 스크린샷은 PNG입니다.')
+  if (png.length > PNG_MAX) return t('A picture is up to 4 MB.', '사진은 4 MB까지 보낼 수 있습니다.')
+  const r = await api($, 'POST', '/pic', { window: await $.session.id(), png })
+  if (r.status !== 200) {
+    return errorOf(r, {
+      400: t('Only a PNG up to 4 MB.', '4 MB 이하 PNG만 보낼 수 있습니다.'),
+      409: String(r.data?.error ?? '').includes('minute') ? t('Up to 6 pictures a minute.', '사진은 1분에 6장까지 보낼 수 있습니다.') : t('Not connected.', '연결되어 있지 않습니다.'),
+    })
+  }
+  const { value: me } = await $.state.get(ME)
+  await keepPicture($, { from: me ?? 'me', png, at: Date.now(), isStranger: false })
+  const { width, height } = sizeOf(png)
+  const name = path.split('/').pop() ?? path
+  return t(`📷 Sent ${name} (${width}×${height}). See it: /knock pic`, `📷 ${name} (${width}×${height})을(를) 보냈습니다. 보기: /knock pic`)
+}
+
+async function openViewer($: $): Promise<string> {
+  if (!pictures.length) return t('No pictures yet. Send one in a chat: /knock pic <path to a PNG>', '아직 사진이 없습니다. 채팅 중에 보내기: /knock pic <PNG 경로>')
+  const { value: viewer } = await $.state.get(VIEWER)
+  await $.state.set(VIEWER, { index: 0, seq: (viewer?.seq ?? 0) + 1 })
+  const opened = await $.ui.open({ id: PICTURE_PANE, title: '📷', focus: true, closeOnEscape: true, rows: 24 })
+  return opened.isPlaced ? '' : t('Could not open the picture viewer here.', '여기서는 사진 보기 창을 열 수 없습니다.')
+}
+
+async function showPicture($: $, index: number) {
+  await update($, VIEWER, viewer => (viewer ? { ...viewer, index } : null))
 }
 
 // The /knock menu: a dialog pane that walks through knocking, the lobby, rooms and settings.
@@ -769,6 +1121,8 @@ async function knockCommand($: $, args: string): Promise<string> {
       return settings($, tail)
     case 'off':
       return leave($)
+    case 'pic':
+      return picture($, tail)
     default:
       return knock($, args)
   }
@@ -984,7 +1338,7 @@ export const register: Register = on => {
       $.command.register({
         name: 'knock',
         description: 'knock menu · /knock <friend> knocks at once · also room, random, me, off',
-        argumentHint: '[friend | room | random | next | block | me | off]',
+        argumentHint: '[friend | room | random | next | block | me | pic | off]',
         immediate: true,
       }),
       $.command.register({
@@ -1062,7 +1416,7 @@ export const register: Register = on => {
         'knock menu · /knock <friend> knocks at once · also room, random, me, off',
         'knock 메뉴 · /knock <친구>로 바로 노크 · room, random, me, off 도 받습니다',
       ),
-      argumentHint: t('[friend | room | random | next | block | me | off]', '[친구 이름 | room | random | next | block | me | off]'),
+      argumentHint: t('[friend | room | random | next | block | me | pic | off]', '[친구 이름 | room | random | next | block | me | pic | off]'),
     }
   })
 
@@ -1264,6 +1618,69 @@ export const register: Register = on => {
       ].map((row, i) => ({ ...row, hotkey: String(i + 1) })),
       null,
       keysHint,
+    )
+  })
+
+  // The picture viewer: the picture drawn in colored block cells, which any terminal shows, or on g
+  // the sharp picture, which only terminals with graphics (iTerm2, Ghostty, kitty) draw.
+  on('ui.render', { component: 'Pane', requestId: PICTURE_PANE }, async ($, e) => {
+    const table = $.ui.resolve(e)
+    const { Box, Text, Button } = table
+    const { value: viewer } = await $.state.get(VIEWER)
+    const index = Math.min(viewer?.index ?? 0, Math.max(0, pictures.length - 1))
+    const shown = pictures[index]
+    if (!shown || !('Image' in table) || !('Raster' in table)) {
+      return <Text dimColor>{t('No picture to show here.', '여기서 보여 줄 사진이 없습니다.')}</Text>
+    }
+    const { Image, Raster } = table
+    const isSharp = !!viewer?.isSharp
+    if (!isSharp && shown.thumb === undefined) shown.thumb = thumbOf(shown.png, 240)
+    const older = index + 1 < pictures.length
+    const newer = index > 0
+    // A terminal cell is about twice as tall as wide; the rows left after the caption and the keys.
+    const room = Math.max(1, e.props.scroll.bodyRows - 2 - (older ? 1 : 0) - (newer ? 1 : 0))
+    let columns = Math.max(1, Math.min(e.props.bodyColumns, 120, isSharp ? 120 : (shown.thumb?.width ?? 120)))
+    let rows = Math.max(1, Math.round((columns * shown.height) / shown.width / 2))
+    if (rows > room) {
+      rows = room
+      columns = Math.max(1, Math.min(columns, Math.round((rows * 2 * shown.width) / shown.height)))
+    }
+    const time = new Date(shown.at).toTimeString().slice(0, 5)
+    const picture = isSharp ? (
+      shown.png.length <= SHARP_MAX ? (
+        <Image
+          key={`sharp-${shown.at}-${shown.from}`}
+          source={{ png: shown.png }}
+          columns={columns}
+          rows={rows}
+          alt={t('This terminal does not draw sharp pictures: press g for the block view', '이 터미널은 선명한 사진을 그리지 못합니다: g로 블록 보기')}
+        />
+      ) : (
+        <Text dimColor>{t('Over 2 MB: the sharp view cannot draw it. Press g for the block view.', '2 MB가 넘어 선명하게 볼 수 없습니다. g로 블록 보기.')}</Text>
+      )
+    ) : shown.thumb ? (
+      <Raster key={`blocks-${shown.at}-${shown.from}`} columns={columns} rows={rows} cells={cellsOf(shown.thumb, columns, rows)} />
+    ) : (
+      <Text dimColor>{t('This picture could not be read (an interlaced or broken PNG).', '이 사진은 읽을 수 없습니다 (인터레이스이거나 깨진 PNG).')}</Text>
+    )
+    return (
+      <Box flexDirection="column">
+        <Text>
+          {`📷 ${shown.from} · ${time} · ${shown.width}×${shown.height}`}
+          <Text dimColor>{` · ${index + 1}/${pictures.length} · Esc ${t('closes', '닫기')}`}</Text>
+        </Text>
+        {picture}
+        <Button
+          key="sharp"
+          plain
+          hotkey="g"
+          autoFocus
+          label={isSharp ? t('block view (any terminal)', '블록 보기 (모든 터미널)') : t('sharp view (iTerm2, Ghostty, kitty)', '선명하게 보기 (iTerm2, Ghostty, kitty)')}
+          onPress={() => void update($, VIEWER, current => (current ? { ...current, isSharp: !current.isSharp } : null))}
+        />
+        {older && <Button key="older" plain hotkey="o" label={t('older picture', '이전 사진')} onPress={() => void showPicture($, index + 1)} />}
+        {newer && <Button key="newer" plain hotkey="n" label={t('newer picture', '다음 사진')} onPress={() => void showPicture($, index - 1)} />}
+      </Box>
     )
   })
 

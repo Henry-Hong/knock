@@ -40,6 +40,7 @@ Already know your way? `/knock bob` knocks on bob at once, and `/knock off` leav
 | `/knock room [room]` | Join a group room, up to 8 people. Alone, it shows who's in your room |
 | `/knock block [name]` | Block the person you're chatting with, or a name |
 | `/knock me` | Your settings: your name's color (with a preview), your name, and the language. `/knock me color blue`, `/knock me name <name>` and `/knock me lang ko` do it directly |
+| `/knock pic <file.png>` | Send a PNG picture to the chat or room. `/knock pic` alone shows the pictures you got |
 | `/knock off` | Leave the chat or room (or stop looking) and go back to Claude |
 
 The older `/knock-room`-style commands still work, out of the typeahead.
@@ -133,6 +134,23 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 - The room goes away when the last person leaves.
 - `/knock block <name>` stops that person's messages reaching you, and yours reaching them.
 - **A room's name isn't a password.** Anyone who guesses it can come in. For a private room, pick a name nobody would guess, like `lunch-7k2q`.
+
+</details>
+
+<details>
+<summary><b>Pictures</b></summary>
+
+In a chat or a room, `/knock pic ~/Desktop/shot.png` sends a picture. Paste the path, or drag the file in; quotes and spaces are fine.
+
+```
+⏺ bob 📷 sent a picture · see it: /knock pic
+```
+
+- `/knock pic` opens a viewer with the latest pictures, newest first: `o` older, `n` newer, `Esc` closes.
+- The viewer draws the picture in colored blocks, which works in any terminal. Press `g` for the sharp picture where the terminal can draw one (iTerm2, Ghostty, kitty; up to 2 MB).
+- PNG only (a screenshot is one), up to 4 MB, 6 a minute. The server passes pictures on and keeps none.
+- A picture from someone met at random says so: open it only if you trust them.
+- Pasting an image with ctrl+v doesn't work: Claude Code keeps pasted images from plugins.
 
 </details>
 

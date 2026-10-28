@@ -17,6 +17,10 @@ const ROOM = /^[^\s\p{Cc}]{0,32}$/u
 const GROUP_MAX = 8
 // How long /knock next keeps the one moved on from out of the mover's random matches, both ways.
 const SKIP_MS = 60_000
+// A picture is a whole PNG, base64, up to 4 MiB decoded (what a mod's $.fs.read reads); a few a minute.
+const PNG_MAX = Math.ceil((4 * 1024 * 1024) / 3) * 4
+const PNG_HEAD = 'iVBORw0KGgo'
+const PICTURES_PER_MINUTE = 6
 // The colors a name can be drawn in; the client picks the shades.
 const COLORS = ['red', 'orange', 'yellow', 'green', 'sky', 'blue', 'purple', 'pink']
 
@@ -27,6 +31,8 @@ export type KnockEvent =
   // `isClaude` when it is Claude's answer to `from`, who asked with @claude.
   | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string; isClaude?: true }
   | { type: 'left'; peer: string; reason: 'left' | 'timeout' }
+  // A picture, as `message` is said: `png` the whole file, base64.
+  | { type: 'picture'; from: string; png: string; at: number; group?: string }
   // Someone came into or went out of this window's group room; count is how many are in it now.
   | { type: 'joined'; name: string; count: number }
   | { type: 'departed'; name: string; count: number; reason: 'left' | 'timeout' }
@@ -64,6 +70,8 @@ export class Hub extends DurableObject<Env> {
   private live = new Map<string, Live>()
   // Who is in each group room. A room exists while someone is in it.
   private groups = new Map<string, Set<string>>()
+  // When each user sent their latest pictures, to hold them to a few a minute.
+  private sentPictures = new Map<string, number[]>()
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -217,6 +225,29 @@ export class Hub extends DurableObject<Env> {
       .filter(([name, l]) => l.target === me && !l.peer && !this.hasBlocked(me, name))
       .map(([name]) => name)
     return ok({ from })
+  }
+
+  // Hands a picture on as `send` hands text: to the peer, or the rest of the room. Nothing keeps it.
+  async picture(token: string, window: string, png: string): Promise<Result<{ to: string[] }>> {
+    const me = await this.auth(token)
+    if (!me) return fail(401, 'unknown token')
+    const live = this.live.get(me)
+    if (!live || live.window !== window || !(live.peer || live.group)) return fail(409, 'not connected')
+    if (!png.startsWith(PNG_HEAD)) return fail(400, 'a picture must be a PNG')
+    if (png.length > PNG_MAX) return fail(400, 'a picture is up to 4 MB')
+    const now = Date.now()
+    const recent = (this.sentPictures.get(me) ?? []).filter(at => now - at < 60_000)
+    if (recent.length >= PICTURES_PER_MINUTE) return fail(409, `up to ${PICTURES_PER_MINUTE} pictures a minute`)
+    this.sentPictures.set(me, [...recent, now])
+    if (live.peer) {
+      this.push(live.peer, { type: 'picture', from: me, png, at: now })
+      return ok({ to: [live.peer] })
+    }
+    const group = live.group!
+    const blocked = this.blocked(me)
+    const to = [...(this.groups.get(group) ?? [])].filter(name => name !== me && !blocked.has(name))
+    for (const name of to) this.push(name, { type: 'picture', from: me, png, at: now, group })
+    return ok({ to })
   }
 
   // Hands `text` to the peer, or to everyone else in the group room but those blocked either way.
