@@ -7,7 +7,6 @@ type Reply = { status: number; data: Record<string, unknown> | null }
 type Message = Extract<KnockEvent, { type: 'message' }>
 
 const DEFAULT_SERVER = 'https://knock.everwish.workers.dev'
-const INSTALL = '/plugin install knock --marketplace Henry-Hong/knock'
 // As the server checks them.
 const NAME = /^[a-z0-9][a-z0-9_-]{1,19}$/
 const MAX_TEXT = 4_000
@@ -76,27 +75,27 @@ const eventsOf = (r: Reply) => (r.data?.events ?? []) as KnockEvent[]
 // A line for `claude --debug-file` alone, led by the plugin's name.
 const dbg = ($: $, text: string) => $.ui.log(text, { to: 'debug' })
 
-// A row in the transcript the person sees and the model never reads.
-const notice = ($: $, text: string) => $.ui.log(text)
+// A headline, then one bullet per detail; details left empty are dropped.
+const say = (head: string, ...details: (string | false | undefined)[]) =>
+  [head, ...details.filter(Boolean).map(d => `• ${d}`)].join('\n')
+
+// A row in the transcript the person sees and the model never reads. It draws one line,
+// so a headline and its bullets fold into one.
+const notice = ($: $, text: string) => $.ui.log(text.replace(/\n(• )?/g, ' · '))
 
 async function showStatus($: $, chat: Chat | null) {
   const { value: me } = await $.state.get(ME)
   $.ui.status(chat ? (chat.isConnected ? `💬 ${me} ↔ ${chat.peer}` : `⏳ ${me} → ${chat.peer} 기다리는 중`) : undefined)
 }
 
-const NAME_RULE = '이름은 영문 소문자·숫자·_·-로 2~20자입니다. 첫 글자는 영문 또는 숫자여야 합니다.'
-
-const guideText = [
-  '🚪 Claude Code 안에서 친구와 채팅합니다.',
-  '1. /knock-init <이름> 으로 내 이름을 정합니다',
-  '2. 친구에게 내 이름을 알려 줍니다',
-  '3. 서로 /knock <상대 이름> 하면 연결됩니다',
-].join('\n')
-
-const shareText = (me: string) => `친구에게 보낼 말: "knock 깔고(${INSTALL}) /knock ${me} 해 줘"`
+const NAME_RULE = '이름은 영문 소문자·숫자·_·-로 2~20자이며, 영문이나 숫자로 시작해야 합니다.'
 
 const connectedText = (peer: string) =>
-  `💬 ${peer} 님과 연결되었습니다. 이제 입력하는 내용은 ${peer} 님에게 전달되고, 답장은 Claude 답변 자리에 표시됩니다. 끝내려면 /knock-off`
+  say(
+    `💬 ${peer} 님과 연결되었습니다.`,
+    `입력하면 ${peer} 님에게 전달되고, 답장은 Claude 답변 자리에 표시됩니다`,
+    '끝내기: /knock-off',
+  )
 
 const relayNote = (peers: string[]) =>
   `Note from the knock plugin: earlier in this session the user chatted with their friend ${peers.join(', ')} through knock. ` +
@@ -143,7 +142,7 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       return
     }
     case 'knocked':
-      notice($, `🚪 ${event.from} 님이 노크했습니다. /knock ${event.from} 하면 연결됩니다.`)
+      notice($, say(`🚪 ${event.from} 님이 노크했습니다.`, `연결: /knock ${event.from}`))
       return
     case 'left':
       await endChat($)
@@ -160,7 +159,7 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       return
     case 'ended':
       await endChat($)
-      notice($, '연결이 종료되었습니다. 다시 연결하려면 /knock <이름>')
+      notice($, say('연결이 종료되었습니다.', '다시 연결: /knock <이름>'))
   }
 }
 
@@ -249,22 +248,28 @@ async function* typeOut($: $, text: string, isAnimated: boolean) {
   }
 }
 
-// Names this machine holds a token for. Several means several people (or tests) share it,
-// so a window never guesses which one it is.
-const namesHint = (accounts: Record<string, string>) => {
+// No name in this window yet. Several names on this machine means several people (or tests)
+// share it, so a window never guesses which one it is.
+function noNameText(accounts: Record<string, string>) {
   const names = Object.keys(accounts)
-  return names.length ? `\n이 컴퓨터에 있는 이름: ${names.join(', ')}` : ''
+  return say(
+    '아직 이름이 없습니다.',
+    '이름 정하기: /knock-init <이름>',
+    names.length > 0 && `이 컴퓨터에 있는 이름: ${names.join(', ')}`,
+    '그다음 서로 /knock <상대 이름> 하면 연결됩니다',
+  )
 }
 
 async function whoami($: $): Promise<string> {
   const server = await serverOf($)
   const { value: me } = await $.state.get(ME)
-  if (!me) return `아직 이름이 없습니다. /knock-init <이름>으로 이름을 정해 주세요.${namesHint(await accountsOf($, server))}`
+  if (!me) return noNameText(await accountsOf($, server))
   const { value: chat } = await $.state.get(CHAT)
-  const lines = [`나: ${me}`]
-  if (chat) lines.push(chat.isConnected ? `💬 ${chat.peer} 님과 대화 중` : `⏳ ${chat.peer} 님 기다리는 중`)
-  if (server !== DEFAULT_SERVER) lines.push(`서버: ${server}`)
-  return lines.join('\n')
+  return say(
+    `나: ${me}`,
+    !!chat && (chat.isConnected ? `💬 ${chat.peer} 님과 대화 중` : `⏳ ${chat.peer} 님 기다리는 중`),
+    server !== DEFAULT_SERVER && `서버: ${server}`,
+  )
 }
 
 async function init($: $, args: string): Promise<string> {
@@ -284,47 +289,45 @@ async function init($: $, args: string): Promise<string> {
     await $.store.set(`accounts:${server}`, accounts)
   }
   await $.state.set(ME, name)
-  return [`이름 설정 완료: ${name}`, shareText(name), '친구에게 노크하려면 /knock <친구 이름>'].join('\n')
+  return say(`이름 설정 완료: ${name}`, '친구에게 노크: /knock <친구 이름>')
 }
 
 // `/knock` alone: where things stand and what to do next.
 async function overview($: $, me: string): Promise<string> {
   const { value: chat } = await $.state.get(CHAT)
-  if (chat?.isConnected) return `💬 ${chat.peer} 님과 대화 중입니다. 끝내려면 /knock-off`
+  if (chat?.isConnected) return say(`💬 ${chat.peer} 님과 대화 중입니다.`, '끝내기: /knock-off')
   const r = await api($, 'GET', '/knocks')
   if (r.status !== 200) return `노크 목록을 가져오지 못했습니다: ${errorOf(r)}`
   const from = (r.data?.from ?? []) as string[]
-  const lines = [`나: ${me}`]
-  if (chat) lines.push(`⏳ ${chat.peer} 님을 기다리는 중입니다.`)
-  if (from.length) lines.push(`🚪 노크한 사람: ${from.join(', ')}`, '/knock <이름> 하면 바로 연결됩니다.')
-  else if (!chat) lines.push('아직 노크한 사람이 없습니다.', '친구에게 노크하려면 /knock <친구 이름>', shareText(me))
-  return lines.join('\n')
+  const knocked = `🚪 ${from.join(', ')} 님이 노크했습니다`
+  const connect = `연결: /knock ${from.length === 1 ? from[0] : '<이름>'}`
+  if (chat) return say(`⏳ ${chat.peer} 님을 기다리는 중입니다. (나: ${me})`, from.length > 0 && `${knocked}. ${connect}`)
+  if (from.length) return say(`${knocked}. (나: ${me})`, connect)
+  return say(`노크한 사람이 없습니다. (나: ${me})`, '친구에게 노크: /knock <친구 이름>')
 }
 
 async function knock($: $, args: string): Promise<string> {
   const { value: me } = await $.state.get(ME)
-  if (!me) return guideText + namesHint(await accountsOf($, await serverOf($)))
+  if (!me) return noNameText(await accountsOf($, await serverOf($)))
   const to = args.trim().toLowerCase()
   if (!to) return overview($, me)
   if (to === me) return '자기 자신에게는 노크할 수 없습니다.'
 
   const r = await api($, 'POST', '/knock', { window: await $.session.id(), to })
-  if (r.status !== 200) {
-    return errorOf(r, { 404: `없는 이름입니다: ${to}. 친구가 /knock-init으로 정한 이름이 맞는지 확인해 주세요.` })
-  }
+  if (r.status !== 200) return errorOf(r, { 404: `없는 이름입니다: ${to}. 친구의 knock 이름을 확인해 주세요.` })
   const chat = { peer: to, isConnected: r.data?.state === 'connected' }
   await $.state.set(CHAT, chat)
   await showStatus($, chat)
   startLoop($)
   if (chat.isConnected) return connectedText(to)
-  return [
-    `⏳ ${to} 님에게 노크했습니다. ${to} 님이 /knock ${me} 하면 연결됩니다.`,
-    // Only a window that waits on a knock hears one, so the peer may not know yet.
-    r.data?.isNotified
-      ? `${to} 님에게 노크 알림이 전달되었습니다.`
-      : `${to} 님은 지금 노크를 기다리는 창이 없어 알림이 전달되지 않았습니다. "/knock ${me} 해 줘"라고 직접 알려 주세요.`,
-    '그동안 Claude와 계속 작업하셔도 됩니다.',
-  ].join('\n')
+  // Only a window that waits on a knock hears one, so the peer may not know yet.
+  return r.data?.isNotified
+    ? say(`⏳ ${to} 님에게 노크했습니다.`, `알림이 전달되었습니다. ${to} 님이 /knock ${me} 하면 연결됩니다`)
+    : say(
+        `⏳ ${to} 님에게 노크했습니다.`,
+        `${to} 님이 지금 knock을 열어 두지 않아 알림이 가지 않았습니다`,
+        `${to} 님에게 /knock ${me} 해 달라고 직접 알려 주세요`,
+      )
 }
 
 async function leave($: $): Promise<string> {
@@ -344,11 +347,11 @@ const withServer = async ($: $, run: () => Promise<string>) => {
 }
 
 // Mid-turn a command's output only draws once the turn ends, and a chat turn listens on:
-// say it as a notice then, which is one line.
+// say it as a notice then.
 async function answer($: $, run: () => Promise<string>) {
   const shown = await withServer($, run)
   if (!runningTurns.size) return shown
-  notice($, shown.text.replaceAll('\n', ' · '))
+  notice($, shown.text)
   return {}
 }
 
@@ -384,7 +387,7 @@ export const register: Register = on => {
     // The first window after install says where to start, once per server.
     if (!names.length && !(await $.store.get(`welcomed:${server}`))) {
       await $.store.set(`welcomed:${server}`, true)
-      notice($, '🚪 knock이 설치되었습니다. /knock 을 입력하면 시작 방법을 안내합니다.')
+      notice($, say('🚪 knock이 설치되었습니다.', '시작: /knock-init <이름>'))
     }
     // After a hot reload the chat is still on: pick its poll loop back up.
     const { value: chat } = await $.state.get(CHAT)
