@@ -30,7 +30,8 @@ const RESERVE_MS = 1_000
 
 // Module state starts over on a hot reload; at worst a message is never drawn.
 let loop = 0 // bumped to stop the background poll loop
-let isStepping = false // a chat turn is answering, and polls for itself
+let steppingTurn: string | null = null // the chat turn answering now, which polls for itself
+let submissions = 0 // prompts submitted and commands run, to tell an Enter that went nowhere
 let isInboxTurnQueued = false // a 📨 turn is already on its way to show the inbox
 let inbox: Message[] = []
 let stopWaiting: (() => void) | null = null
@@ -244,10 +245,14 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
 // Between chat turns the background loop polls; messages it gets start a 📨 turn.
 async function pollOnce($: $, id: number) {
   if (id !== loop) return
+  const window = await $.session.id()
   let r: Reply | null = null
   try {
     r = await poll($, POLL_HOLD_MS)
   } catch {}
+  // A /clear moved this window to a new session id while the poll was out; what it brings
+  // (a `replaced`, as the window took its chat over) was for the old one.
+  if (window !== (await $.session.id())) return
   if (r?.status === 200) await take($, eventsOf(r))
   if (id !== loop) return
   if (!r || isPassing(r)) {
@@ -260,12 +265,14 @@ async function pollOnce($: $, id: number) {
     return
   }
   showInbox($)
+  // No chat left to poll for: the server answers such a poll at once (`ended`), so going on spins.
+  if (!(await $.state.get(CHAT)).value) return
   if (id === loop) $.clock.after(0, () => void pollOnce($, id))
 }
 
 function showInbox($: $) {
   const first = inbox[0]
-  if (!first || isStepping || isInboxTurnQueued) return
+  if (!first || steppingTurn || isInboxTurnQueued) return
   isInboxTurnQueued = true
   const text = `📨 ${first.from}`
   pendingTurns.push(text)
@@ -482,6 +489,35 @@ async function block($: $, args: string): Promise<string> {
   )
 }
 
+// After a /clear the window is a new session: fresh state, and a new id the server knows it by.
+// Keep the name, and take the chat over to the new id, as a second window would; only the
+// screen and Claude's history start over.
+async function carryOver($: $, oldId: string, me: string | null | undefined, chat: Chat | null | undefined) {
+  for (let i = 0; i < 60 && (await $.session.id()) === oldId; i++) await $.clock.sleep(50)
+  if (me) await $.state.set(ME, me)
+  if (!me || !chat) return
+  if (chat.isRandom && !chat.peer) {
+    notice($, await seek($, chat.room ?? ''))
+    return
+  }
+  const window = await $.session.id()
+  const r = chat.group
+    ? await api($, 'POST', '/room', { window, room: chat.group })
+    : await api($, 'POST', '/knock', { window, to: chat.peer })
+  if (r.status !== 200) {
+    await showStatus($, null)
+    notice($, `대화 기록을 지우면서 연결이 끊겼습니다 (${errorOf(r)})`)
+    return
+  }
+  const kept = chat.group
+    ? { ...chat, members: (r.data?.members ?? chat.members) as string[] }
+    : { ...chat, isConnected: r.data?.state === 'connected' }
+  await $.state.set(CHAT, kept)
+  await showStatus($, kept)
+  startLoop($)
+  notice($, say('대화 기록을 지웠습니다. 채팅은 그대로 이어집니다.', '끝내기: /knock-off'))
+}
+
 // Who else is in the room, or that no one is yet.
 function groupLine(chat: Chat, me: string | null | undefined) {
   const others = (chat.members ?? []).filter(name => name !== me)
@@ -609,6 +645,11 @@ export const register: Register = on => {
     return started
   })
 
+  // Every command run, built-in or not, for the queued-command check below.
+  on('command.run', ($, e, next) => {
+    submissions++
+    return next(e)
+  })
   on('command.run', { command: 'knock-init' }, ($, e) => answer($, () => init($, e.args)))
   on('command.run', { command: 'knock' }, ($, e) => answer($, () => knock($, e.args)))
   on('command.run', { command: 'knock-random' }, ($, e) => answer($, () => random($, e.args)))
@@ -622,6 +663,7 @@ export const register: Register = on => {
   // While connected, what the person types goes to the peer as well as into the transcript;
   // the turn it starts is answered by the peer, not the model.
   on('prompt.submit', async ($, e, next) => {
+    submissions++
     if (e.command || e.isMeta || e.origin.kind !== 'composer') return next(e)
     const { value: chat } = await $.state.get(CHAT)
     if (!chat?.isConnected) {
@@ -668,6 +710,21 @@ export const register: Register = on => {
     return submitted
   }).catch(($, e, next) => (next.called ? next(e) : { drop: 'knock: 메시지를 보내지 못했습니다. 다시 보내 주세요.' }))
 
+  // A slash command typed over a chat turn (/clear, /compact) is queued behind it with no
+  // prompt.submit, and a chat turn listens on. The box emptied with nothing submitted or run
+  // soon after means that (or a plain clear): end the turn, so the command runs now.
+  on('prompt.change', { origin: { kind: 'clear' } }, ($, e, next) => {
+    const turnId = steppingTurn
+    const seen = submissions
+    if (turnId) {
+      $.clock.after(500, () => {
+        if (submissions !== seen || steppingTurn !== turnId) return
+        void $.turn.abort({ turnId }).catch(err => dbg($, `abort failed: ${err}`))
+      })
+    }
+    return next(e)
+  })
+
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) {
       runningTurns.add(e.turnId)
@@ -694,9 +751,9 @@ export const register: Register = on => {
       return result('')
     }
 
-    isStepping = true
+    steppingTurn = e.turnId
     isInboxTurnQueued = false
-    loop++
+    const stepLoop = ++loop
     const said: string[] = []
     try {
       while (!next.signal.aborted && next.budget.remainingMs > RESERVE_MS) {
@@ -709,8 +766,10 @@ export const register: Register = on => {
         }
       }
     } finally {
-      isStepping = false
-      if ((await $.state.get(CHAT)).value) startLoop($)
+      steppingTurn = null
+      // Back to the background loop, unless the chat ended (endChat bumps the loop) or another
+      // loop took over meanwhile. The state may still read as it was when this step began.
+      if (loop === stepLoop && (await $.state.get(CHAT)).value) startLoop($)
     }
     yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: null }
     return result(said.join('\n'))
@@ -724,6 +783,13 @@ export const register: Register = on => {
 
   on('session.end', async ($, e, next) => {
     const { value: chat } = await $.state.get(CHAT)
+    // A /clear goes on in this process as a new session, and knock goes with it.
+    if (e.reason === 'clear') {
+      const { value: me } = await $.state.get(ME)
+      loop++
+      $.clock.after(0, () => void carryOver($, e.sessionId, me, chat).catch(err => dbg($, `carry over failed: ${err}`)))
+      return next(e)
+    }
     if (chat) await api($, 'POST', '/leave', { window: await $.session.id() }).catch(() => undefined)
     return next(e)
   })

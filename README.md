@@ -77,6 +77,7 @@ A knock notice (🚪) shows up only in a **window that's waiting on a knock**: o
 - **`› Prompt from the knock plugin`**: a label Claude Code adds when a message arrives while you're idle and knock opens a turn for it. Plugins can't remove it. Later messages land in the same turn, so it shows up once.
 - **Status line**: `💬 alice ↔ bob` means connected. `⏳ alice → bob` means you're waiting for them to knock back. `🎲` marks a random match, or a lobby you're waiting in. `👥 alice · lunch 3/8` means you're in a room with 3 people.
 - **Esc**: interrupts the chat turn, and Claude Code shows `Interrupted`. Use `/knock-off` to leave cleanly.
+- **`/clear` in a chat**: clears the screen and Claude's history, and the chat goes on. knock keeps your name and your chat or room.
 
 </details>
 
