@@ -583,10 +583,24 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
     knocks: knocks?.status === 200 ? ((knocks.data?.from ?? []) as string[]) : [],
     ...recent,
   })
-  const opened = await $.ui.open({ id: MENU_PANE, title: 'knock', focus: true, closeOnEscape: true, holdToasts: true, rows: 20 })
+  const opened = await showMenu($)
   if (opened.isPlaced) return ''
   return me ? overview($, me) : noNameText(await accountsOf($, await serverOf($)))
 }
+
+// Where Esc and Back lead from a step: home, or the step it was entered from. None before a name
+// is picked, nor from home: there Esc closes the menu.
+function parentOf(step: MenuStep, hasName: boolean): MenuStep | null {
+  if (!hasName || step === 'home' || step === 'lang') return null
+  if (step === 'lobby') return 'random'
+  if (step === 'name') return 'me'
+  return 'home'
+}
+
+// Shows the menu pane as a dialog that holds the keyboard; again after a step back, as the Esc
+// that took it there handed the keys to the prompt.
+const showMenu = ($: $) =>
+  $.ui.open({ id: MENU_PANE, title: 'knock', focus: true, closeOnEscape: true, holdToasts: true, rows: 20 })
 
 async function goto($: $, step: MenuStep, note?: string) {
   await update($, MENU, menu => (menu ? { ...menu, step, note } : null))
@@ -1049,8 +1063,13 @@ export const register: Register = on => {
     ) : (
       <Text weight="bold">{t('🚪 Welcome to knock', '🚪 knock에 오신 것을 환영합니다')}</Text>
     )
-    const keysHint = <Text dimColor>{t('Key, or ↑↓ Enter · Esc closes', '키, 또는 ↑↓ Enter · Esc 닫기')}</Text>
-    const back = <Button key="back" plain dimColor label={t('← Back', '← 처음으로')} onPress={() => void goto($, 'home')} />
+    const parent = parentOf(menu.step, !!me)
+    const escSays = parent ? t('Esc back', 'Esc 뒤로') : t('Esc closes', 'Esc 닫기')
+    const keysHint = <Text dimColor>{`${t('Key, or ↑↓ Enter', '키, 또는 ↑↓ Enter')} · ${escSays}`}</Text>
+    const goBack = () => void goto($, parent ?? 'home')
+    const back = <Button key="back" plain hotkey="0" label={t('← Back', '← 뒤로')} onPress={goBack} />
+    // Under a field a digit is typed into it, so the way back there has no key.
+    const backRow = <Button key="back" plain label={t('← Back', '← 뒤로')} onPress={goBack} />
     // Under a field: recent friends or rooms on one row, then the way back.
     const below = (list: string[], run: (value: string) => Promise<string>) => (
       <Box flexDirection="row" gap={2}>
@@ -1058,10 +1077,10 @@ export const register: Register = on => {
         {list.slice(0, 4).map(one => (
           <Button key={`recent-${one}`} plain label={one} onPress={() => void act($, () => run(one))} />
         ))}
-        {back}
+        {backRow}
       </Box>
     )
-    const fieldHint = <Text dimColor>{t('Enter saves · Tab moves · Esc closes', 'Enter 저장 · Tab 이동 · Esc 닫기')}</Text>
+    const fieldHint = <Text dimColor>{`${t('Enter saves · Tab moves', 'Enter 저장 · Tab 이동')} · ${escSays}`}</Text>
 
     if (menu.step === 'lang') {
       return (
@@ -1084,7 +1103,7 @@ export const register: Register = on => {
           </Text>
           {menu.note && <Text color="#d9534f">{menu.note}</Text>}
           <Input key="name" label={t('Name', '이름')} placeholder={t('e.g. alice', '예: alice')} submitLabel={t('Save', '정하기')} autoFocus onSubmit={(value: string) => void submitName($, value)} />
-          {me ? back : null}
+          {me ? backRow : null}
           {space >= (menu.note ? 5 : 4) + (me ? 1 : 0) && fieldHint}
         </Box>
       )
@@ -1095,7 +1114,7 @@ export const register: Register = on => {
           {space >= 3 && header}
           <Input key="friend" label={t("Friend's name", '친구 이름')} placeholder={t('e.g. bob', '예: bob')} submitLabel={t('Knock', '노크')} autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
           {below([...new Set([...menu.knocks, ...menu.friends])], value => knock($, value))}
-          {space >= 4 && <Text dimColor>{t('Knock on each other to connect · Esc closes', '서로 노크하면 연결됩니다 · Esc로 닫기')}</Text>}
+          {space >= 4 && <Text dimColor>{`${t('Knock on each other to connect', '서로 노크하면 연결됩니다')} · ${escSays}`}</Text>}
         </Box>
       )
     }
@@ -1125,7 +1144,7 @@ export const register: Register = on => {
         <Box flexDirection="column">
           {space >= 3 && header}
           <Input key="lobby" label={t('Lobby code', '대기실 코드')} placeholder={t('e.g. our-team', '예: 우리팀')} submitLabel={t('Find', '찾기')} autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
-          {back}
+          {backRow}
           {space >= 4 && fieldHint}
         </Box>
       )
@@ -1221,6 +1240,18 @@ export const register: Register = on => {
       </Box>
     )
   })
+  on('ui.close', { id: MENU_PANE }, async ($, e, next) => {
+    if (e.origin.kind !== 'person') return next(e)
+    const { value: menu } = await $.state.get(MENU)
+    const { value: me } = await $.state.get(ME)
+    const parent = menu ? parentOf(menu.step, !!me) : null
+    if (!parent) return next(e)
+    // Answered without next: the pane stays open, a step back, and takes the keys back.
+    await goto($, parent)
+    $.clock.after(0, () => void showMenu($).catch(err => dbg($, `refocus failed: ${err}`)))
+    return { value: undefined }
+  })
+
   // Its own output is fine as is: it ends the chat turn at once.
   on('command.run', { command: 'knock-off' }, $ => withServer($, () => leave($)))
 
