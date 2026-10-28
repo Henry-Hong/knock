@@ -5,13 +5,14 @@ English | [한국어](README.ko.md)
 **Chat with a friend without leaving Claude Code.**
 What you type goes to your friend, and their replies show up where Claude's answers usually do. No model calls, so no tokens.
 
-| Your window | Your friend's window |
-| --- | --- |
-| `❯ lunch?` | `⏺ lunch?` |
-| `⏺ ramen, lobby in 10` | `❯ ramen, lobby in 10` |
-| `❯ 👍` | `⏺ 👍` |
+| Time | alice's window | bob's window |
+| --- | --- | --- |
+| 12:01 | `❯ lunch?` | |
+| 12:01 | | `⏺ lunch?` |
+| 12:03 | | `❯ ramen, lobby in 5` |
+| 12:03 | `⏺ ramen, lobby in 5` | |
 
-`❯` is what you typed, `⏺` is what your friend said.
+`❯` is what you type. `⏺` is what your friend says, in the spot where Claude's answer would be.
 
 ## Quick start
 
