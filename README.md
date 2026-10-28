@@ -39,7 +39,7 @@ Already know your way? `/knock bob` knocks on bob at once, and `/knock off` leav
 | `/knock next` | Leave this random match and find the next one |
 | `/knock room [room]` | Join a group room, up to 8 people. Alone, it shows who's in your room |
 | `/knock block [name]` | Block the person you're chatting with, or a name |
-| `/knock me` | Your settings: your name's color (with a preview) and your name. `/knock me color blue` and `/knock me name <name>` do it directly |
+| `/knock me` | Your settings: your name's color (with a preview), your name, and the language. `/knock me color blue`, `/knock me name <name>` and `/knock me lang ko` do it directly |
 | `/knock off` | Leave the chat or room (or stop looking) and go back to Claude |
 
 The older `/knock-room`-style commands still work, out of the typeahead.
@@ -49,7 +49,7 @@ The older `/knock-room`-style commands still work, out of the typeahead.
 - **A knock only notifies your friend if they have a knock window open.** knock tells you when it didn't, so you can ping them yourself.
 - **The spinner keeps running while you're connected.** It's waiting for your friend's reply.
 - **The chat stays in that window's Claude history.** Chat in a fresh window, not the one you're working in.
-- **knock's own messages are in Korean for now.**
+- **knock speaks English, or Korean.** English is the default. Pick 한국어 on the first screen of `/knock` or in `/knock me`, or type `/knock me lang ko`. It applies to every window on this computer.
 
 ## More
 

@@ -20,6 +20,16 @@ const STRANGERS = { plugin: 'knock', key: 'strangers' } as const
 const WARNED = { plugin: 'knock', key: 'isWarned' } as const
 const MENU = { plugin: 'knock', key: 'menu' } as const
 
+// What knock says things in: English unless the person picked Korean. Kept for the machine in
+// $.store, read when a window starts and before each command, so every window follows a change.
+type Lang = 'en' | 'ko'
+let lang: Lang = 'en'
+// A text in the language picked, English first.
+const t = (en: string, ko: string) => (lang === 'ko' ? ko : en)
+const loadLang = async ($: $) => {
+  lang = (await $.store.get('lang')) === 'ko' ? 'ko' : 'en'
+}
+
 // The server holds a poll up to 20 s; a mod's fetch gives up at 30 s.
 const POLL_HOLD_MS = 20_000
 // A chat turn keeps listening after a reply, so the peer's next messages land in it
@@ -73,9 +83,12 @@ const poll = async ($: $, holdMs: number) =>
 const errorOf = (r: Reply, known: Partial<Record<number, string>> = {}) =>
   known[r.status] ??
   (r.status === 429
-    ? '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요'
+    ? t('Too many requests. Try again in a moment', '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요')
     : r.status === 401
-      ? '이 컴퓨터에 저장된 이름을 서버에서 찾을 수 없습니다. /knock me name <이름>으로 다시 정해 주세요'
+      ? t(
+          'The server does not know the name saved on this computer. Pick one again: /knock me name <name>',
+          '이 컴퓨터에 저장된 이름을 서버에서 찾을 수 없습니다. /knock me name <이름>으로 다시 정해 주세요',
+        )
       : String(r.data?.error ?? `HTTP ${r.status}`))
 // Worth trying again: the server is down for a moment, or we went over its rate limit.
 const isPassing = (r: Reply) => r.status >= 500 || r.status === 429
@@ -92,11 +105,13 @@ const say = (head: string, ...details: (string | false | undefined)[]) =>
 // so a headline and its bullets fold into one.
 const notice = ($: $, text: string) => $.ui.log(text.replace(/\n(• )?/g, ' · '))
 
-const lobbyOf = (room = '') => (room ? `'${room}' 대기실` : '전체 대기실')
+const lobbyOf = (room = '') => (room ? t(`the '${room}' lobby`, `'${room}' 대기실`) : t('the open lobby', '전체 대기실'))
 const countOf = (chat: Chat) => `${chat.members?.length ?? 1}/${GROUP_MAX}`
 // Up to three names, then how many more.
 const namesOf = (names: string[]) =>
-  names.length > 3 ? `${names.slice(0, 3).join(', ')} 외 ${names.length - 3}명` : names.join(', ')
+  names.length > 3
+    ? `${names.slice(0, 3).join(', ')} ${t(`and ${names.length - 3} more`, `외 ${names.length - 3}명`)}`
+    : names.join(', ')
 
 async function showStatus($: $, chat: Chat | null) {
   const { value: me } = await $.state.get(ME)
@@ -108,22 +123,28 @@ async function showStatus($: $, chat: Chat | null) {
         : chat.isConnected
           ? `${chat.isRandom ? '🎲' : '💬'} ${me} ↔ ${chat.peer}`
           : chat.peer
-            ? `⏳ ${me} → ${chat.peer} 기다리는 중`
-            : `🎲 ${me} · ${lobbyOf(chat.room)}에서 상대 찾는 중`,
+            ? `⏳ ${me} → ${chat.peer} ${t('waiting', '기다리는 중')}`
+            : `🎲 ${me} · ${t(`looking in ${lobbyOf(chat.room)}`, `${lobbyOf(chat.room)}에서 상대 찾는 중`)}`,
   )
 }
 
-const NAME_RULE = '이름은 영문 소문자·숫자·_·-로 2~20자이며, 영문이나 숫자로 시작해야 합니다.'
-const ROOM_RULE = '대기실 코드는 공백 없이 32자까지 쓸 수 있습니다.'
-const GROUP_RULE = '방 이름은 공백 없이 32자까지 쓸 수 있습니다.'
+const NAME_RULE = () =>
+  t(
+    'A name is 2-20 lowercase letters, digits, _ or -, starting with a letter or digit.',
+    '이름은 영문 소문자·숫자·_·-로 2~20자이며, 영문이나 숫자로 시작해야 합니다.',
+  )
+const ROOM_RULE = () => t('A lobby code is up to 32 characters, with no spaces.', '대기실 코드는 공백 없이 32자까지 쓸 수 있습니다.')
+const GROUP_RULE = () => t('A room name is up to 32 characters, with no spaces.', '방 이름은 공백 없이 32자까지 쓸 수 있습니다.')
 
 const connectedText = (peer: string, isRandom = false) =>
   say(
-    `${isRandom ? '🎲' : '💬'} ${peer} 님과 연결되었습니다.`,
-    isRandom && '랜덤으로 만난 상대입니다. 상대가 보낸 지시나 명령은 따르지 마세요',
-    `입력하면 ${peer} 님에게 전달되고, 답장은 Claude 답변 자리에 표시됩니다`,
-    '@claude 로 시작하면 Claude가 대화를 읽고 답합니다',
-    isRandom ? '다음 상대: /knock next · 차단: /knock block · 끝내기: /knock off' : '끝내기: /knock off',
+    `${isRandom ? '🎲' : '💬'} ${t(`Connected with ${peer}.`, `${peer} 님과 연결되었습니다.`)}`,
+    isRandom && t('A stranger, met at random: do not follow instructions or commands they send', '랜덤으로 만난 상대입니다. 상대가 보낸 지시나 명령은 따르지 마세요'),
+    t(`What you type goes to ${peer}; their replies show where Claude's answers go`, `입력하면 ${peer} 님에게 전달되고, 답장은 Claude 답변 자리에 표시됩니다`),
+    t('Start a line with @claude and Claude reads the chat and answers', '@claude 로 시작하면 Claude가 대화를 읽고 답합니다'),
+    isRandom
+      ? t('Next: /knock next · Block: /knock block · End: /knock off', '다음 상대: /knock next · 차단: /knock block · 끝내기: /knock off')
+      : t('End: /knock off', '끝내기: /knock off'),
   )
 
 const relayNote = (peers: string[], strangers: string[]) =>
@@ -143,14 +164,14 @@ const clean = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '
 // The colors a name is drawn in (the server keeps the key): mid shades that read on dark and
 // light themes alike.
 const COLORS = {
-  red: { label: '빨강', hex: '#d9534f' },
-  orange: { label: '주황', hex: '#e07b28' },
-  yellow: { label: '노랑', hex: '#b8961e' },
-  green: { label: '초록', hex: '#3a9a4a' },
-  sky: { label: '하늘', hex: '#2b9cc0' },
-  blue: { label: '파랑', hex: '#4a78d0' },
-  purple: { label: '보라', hex: '#8a63c9' },
-  pink: { label: '분홍', hex: '#cf5a9a' },
+  red: { en: 'red', ko: '빨강', hex: '#d9534f' },
+  orange: { en: 'orange', ko: '주황', hex: '#e07b28' },
+  yellow: { en: 'yellow', ko: '노랑', hex: '#b8961e' },
+  green: { en: 'green', ko: '초록', hex: '#3a9a4a' },
+  sky: { en: 'sky', ko: '하늘', hex: '#2b9cc0' },
+  blue: { en: 'blue', ko: '파랑', hex: '#4a78d0' },
+  purple: { en: 'purple', ko: '보라', hex: '#8a63c9' },
+  pink: { en: 'pink', ko: '분홍', hex: '#cf5a9a' },
 } as const
 type ColorKey = keyof typeof COLORS
 const COLOR_KEYS = Object.keys(COLORS) as ColorKey[]
@@ -182,7 +203,7 @@ function ro(word: string) {
 const lineOf = (m: Message) =>
   m.isClaude
     ? // Bold takes no emoji right after its opening **, so the robot stands outside it.
-      `${paint('🤖 **claude**', CLAUDE.hex)} ${m.text} ${dim(`(${m.from} 님이 부름)`)}`
+      `${paint('🤖 **claude**', CLAUDE.hex)} ${m.text} ${dim(t(`(asked by ${m.from})`, `(${m.from} 님이 부름)`))}`
     : m.group
       ? `${paint(`**${m.from}**`, COLORS[colorFor(m.from, m.color)].hex)} ${m.text}`
       : m.text
@@ -216,9 +237,9 @@ function deliver($: $, m: Message) {
 // @claude: asks Claude about the chat so far, with no tools and nothing of this machine's, and
 // hands the answer to everyone in the chat, this window included. The asker's account pays.
 async function askClaude($: $, me: string, chat: Chat) {
-  if (isAsking) return notice($, '🤖 claude가 아직 앞의 질문에 답하는 중입니다.')
+  if (isAsking) return notice($, t('🤖 claude is still answering the last question.', '🤖 claude가 아직 앞의 질문에 답하는 중입니다.'))
   isAsking = true
-  notice($, '🤖 claude에게 물어보는 중…')
+  notice($, t('🤖 Asking claude…', '🤖 claude에게 물어보는 중…'))
   try {
     const prompt = `${recent.map(line => `${line.from}: ${line.text}`).join('\n')}\n\nThe asker is ${me}.`
     const until = (await $.clock.now()) + 90_000
@@ -238,14 +259,14 @@ async function askClaude($: $, me: string, chat: Chat) {
       if ((await $.clock.now()) >= until) break
       r = await ask()
     }
-    if (!r.isAnswered) return notice($, `🤖 claude가 답하지 못했습니다 (${r.reason})`)
+    if (!r.isAnswered) return notice($, t(`🤖 claude could not answer (${r.reason})`, `🤖 claude가 답하지 못했습니다 (${r.reason})`))
     const text = clean(r.text.trim()).slice(0, MAX_TEXT)
     const sent = await api($, 'POST', '/send', { window: await $.session.id(), text, claude: true })
-    if (sent.status !== 200) notice($, `🤖 claude의 답을 전하지 못했습니다 (${errorOf(sent)})`)
+    if (sent.status !== 200) notice($, t(`🤖 Could not pass claude's answer on (${errorOf(sent)})`, `🤖 claude의 답을 전하지 못했습니다 (${errorOf(sent)})`))
     remember('claude', text)
     deliver($, { type: 'message', from: me, text, at: Date.now(), group: chat.group, isClaude: true })
   } catch {
-    notice($, '🤖 claude를 부르지 못했습니다.')
+    notice($, t('🤖 Could not reach claude.', '🤖 claude를 부르지 못했습니다.'))
   } finally {
     isAsking = false
   }
@@ -318,10 +339,10 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       notice(
         $,
         event.type === 'joined'
-          ? `👋 ${event.name} 님이 들어왔습니다. ${count}`
+          ? `👋 ${t(`${event.name} joined.`, `${event.name} 님이 들어왔습니다.`)} ${count}`
           : event.reason === 'timeout'
-            ? `${event.name} 님의 연결이 끊겼습니다. ${count}`
-            : `${event.name} 님이 나갔습니다. ${count}`,
+            ? `${t(`${event.name} lost connection.`, `${event.name} 님의 연결이 끊겼습니다.`)} ${count}`
+            : `${t(`${event.name} left.`, `${event.name} 님이 나갔습니다.`)} ${count}`,
       )
       return
     }
@@ -334,7 +355,7 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       return
     }
     case 'knocked':
-      notice($, say(`🚪 ${event.from} 님이 노크했습니다.`, `연결: /knock ${event.from}`))
+      notice($, say(`🚪 ${t(`${event.from} knocked.`, `${event.from} 님이 노크했습니다.`)}`, `${t('Connect', '연결')}: /knock ${event.from}`))
       return
     case 'left':
       await endChat($)
@@ -342,21 +363,26 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
         $,
         say(
           event.reason === 'timeout'
-            ? `${event.peer} 님과의 연결이 끊겼습니다. 다시 Claude와 대화합니다.`
-            : `${event.peer} 님이 나갔습니다. 다시 Claude와 대화합니다.`,
-          current?.isRandom && `다른 상대 찾기: /knock random${current.room ? ` ${current.room}` : ''}`,
+            ? t(`Lost the connection with ${event.peer}. Back to Claude.`, `${event.peer} 님과의 연결이 끊겼습니다. 다시 Claude와 대화합니다.`)
+            : t(`${event.peer} left. Back to Claude.`, `${event.peer} 님이 나갔습니다. 다시 Claude와 대화합니다.`),
+          current?.isRandom && `${t('Find someone else', '다른 상대 찾기')}: /knock random${current.room ? ` ${current.room}` : ''}`,
         ),
       )
       return
     case 'replaced':
       await endChat($)
-      notice($, '다른 창에서 knock을 열어 연결이 그 창으로 넘어갔습니다.')
+      notice($, t('knock opened in another window, and the chat moved there.', '다른 창에서 knock을 열어 연결이 그 창으로 넘어갔습니다.'))
       return
     case 'ended':
       await endChat($)
       notice(
         $,
-        say('연결이 종료되었습니다.', current?.group ? `다시 들어가기: /knock room ${current.group}` : '다시 연결: /knock <이름>'),
+        say(
+          t('The chat ended.', '연결이 종료되었습니다.'),
+          current?.group
+            ? `${t('Rejoin', '다시 들어가기')}: /knock room ${current.group}`
+            : `${t('Reconnect', '다시 연결')}: /knock <${t('name', '이름')}>`,
+        ),
       )
   }
 }
@@ -380,7 +406,7 @@ async function pollOnce($: $, id: number) {
   }
   if (r.status !== 200) {
     await endChat($)
-    notice($, `연결이 끊겼습니다 (${errorOf(r)})`)
+    notice($, t(`Disconnected (${errorOf(r)})`, `연결이 끊겼습니다 (${errorOf(r)})`))
     return
   }
   showInbox($)
@@ -425,7 +451,7 @@ async function waitForReply($: $, signal: AbortSignal, listenMs: number): Promis
       if (!r || isPassing(r)) break
       if (r.status !== 200) {
         await endChat($)
-        notice($, `연결이 끊겼습니다 (${errorOf(r)})`)
+        notice($, t(`Disconnected (${errorOf(r)})`, `연결이 끊겼습니다 (${errorOf(r)})`))
         break
       }
       await take($, eventsOf(r))
@@ -457,54 +483,76 @@ async function* typeOut($: $, text: string, isAnimated: boolean) {
 function noNameText(accounts: Record<string, string>) {
   const names = Object.keys(accounts)
   return say(
-    '아직 이름이 없습니다.',
-    '이름 정하기: /knock (메뉴가 안내합니다) 또는 /knock me name <이름>',
-    names.length > 0 && `이 컴퓨터에 있는 이름: ${names.join(', ')}`,
-    '그다음 서로 /knock <상대 이름> 하면 연결됩니다',
+    t('No name yet.', '아직 이름이 없습니다.'),
+    t('Pick one: /knock (the menu walks you through it) or /knock me name <name>', '이름 정하기: /knock (메뉴가 안내합니다) 또는 /knock me name <이름>'),
+    names.length > 0 && `${t('Names on this computer', '이 컴퓨터에 있는 이름')}: ${names.join(', ')}`,
+    t('Then knock on each other with /knock <name> to connect', '그다음 서로 /knock <상대 이름> 하면 연결됩니다'),
   )
 }
 
 // Where this window stands, in one line.
 function statusOf(chat: Chat | null | undefined, me: string) {
-  if (!chat) return '연결 없음'
+  if (!chat) return t('not connected', '연결 없음')
   if (chat.group) return groupLine(chat, me)
-  if (chat.isConnected) return `${chat.isRandom ? '🎲' : '💬'} ${chat.peer} 님과 대화 중`
-  return chat.peer ? `⏳ ${chat.peer} 님 기다리는 중` : `🎲 ${lobbyOf(chat.room)}에서 상대 찾는 중`
+  if (chat.isConnected) return `${chat.isRandom ? '🎲' : '💬'} ${t(`chatting with ${chat.peer}`, `${chat.peer} 님과 대화 중`)}`
+  return chat.peer
+    ? `⏳ ${t(`waiting for ${chat.peer}`, `${chat.peer} 님 기다리는 중`)}`
+    : `🎲 ${t(`looking in ${lobbyOf(chat.room)}`, `${lobbyOf(chat.room)}에서 상대 찾는 중`)}`
 }
 
 // The words `/knock` takes in place of a friend's name, each with what it does; none can be a name.
 const SUBCOMMANDS = {
-  room: '방 들어가기 · /knock room <방 이름>',
-  random: '아무나 만나기 · /knock random [대기실 코드]',
-  next: '다음 랜덤 상대 찾기',
-  block: '차단하기 · /knock block [이름]',
-  me: '내 이름과 색',
-  off: '대화 끝내기',
+  room: () => t('Join a room · /knock room <room>', '방 들어가기 · /knock room <방 이름>'),
+  random: () => t('Meet someone at random · /knock random [code]', '아무나 만나기 · /knock random [대기실 코드]'),
+  next: () => t('Next random match', '다음 랜덤 상대 찾기'),
+  block: () => t('Block someone · /knock block [name]', '차단하기 · /knock block [이름]'),
+  me: () => t('Your name, color and language', '내 이름, 색, 언어'),
+  off: () => t('End the chat', '대화 끝내기'),
 } as const
 const isSubcommand = (word: string): word is keyof typeof SUBCOMMANDS => Object.hasOwn(SUBCOMMANDS, word)
 
-// `/knock me [color [색] | name <이름>]`: the person's own settings, in the menu's settings step.
+// `/knock me [color [색] | name <이름> | lang <en|ko>]`: the person's own settings, in the menu's settings step.
 async function settings($: $, args: string): Promise<string> {
   const [setting = '', ...rest] = args.trim().split(/\s+/)
   const value = rest.join(' ')
   if (setting === 'name' || setting === '이름') return value ? init($, value) : openMenu($, 'name')
   if (setting === 'color' || setting === '색') return value ? setColor($, value) : openMenu($, 'me')
-  if (setting) return say(`모르는 설정입니다: ${setting}`, '색: /knock me color <색> · 이름: /knock me name <이름>')
+  if (setting === 'lang' || setting === 'language' || setting === '언어') return value ? setLang($, value) : openMenu($, 'me')
+  if (setting) {
+    return say(
+      t(`No such setting: ${setting}`, `모르는 설정입니다: ${setting}`),
+      t('/knock me color <color> · /knock me name <name> · /knock me lang <en|ko>', '/knock me color <색> · /knock me name <이름> · /knock me lang <en|ko>'),
+    )
+  }
   return openMenu($, 'me')
 }
 
-const COLOR_LIST = `${COLOR_KEYS.map(key => COLORS[key].label).join(' ')} 자동`
+const colorName = (key: ColorKey) => COLORS[key][lang]
+const COLOR_LIST = () => `${COLOR_KEYS.map(colorName).join(' ')} ${t('auto', '자동')}`
 
 async function setColor($: $, value: string): Promise<string> {
   const { value: me } = await $.state.get(ME)
   if (!me) return noNameText(await accountsOf($, await serverOf($)))
   const wanted = value.trim().toLowerCase()
-  const key = COLOR_KEYS.find(k => k === wanted || COLORS[k].label === wanted)
-  if (!key && wanted !== '자동' && wanted !== 'auto') return say(`모르는 색입니다: ${value}`, `고를 수 있는 색: ${COLOR_LIST}`)
+  const key = COLOR_KEYS.find(k => k === wanted || COLORS[k].ko === wanted)
+  if (!key && wanted !== '자동' && wanted !== 'auto') {
+    return say(t(`No such color: ${value}`, `모르는 색입니다: ${value}`), `${t('Colors', '고를 수 있는 색')}: ${COLOR_LIST()}`)
+  }
   const r = await api($, 'POST', '/me', { color: key ?? '' })
   if (r.status !== 200) return errorOf(r)
-  const label = COLORS[colorFor(me, key)].label
-  return key ? `이름 색을 ${label}${ro(label)} 바꿨습니다.` : `이름 색을 자동(${label})${ro(label)} 되돌렸습니다.`
+  const label = colorName(colorFor(me, key))
+  return key
+    ? t(`Your name is ${label} now.`, `이름 색을 ${label}${ro(label)} 바꿨습니다.`)
+    : t(`Your name's color is automatic again (${label}).`, `이름 색을 자동(${label})${ro(label)} 되돌렸습니다.`)
+}
+
+async function setLang($: $, value: string): Promise<string> {
+  const wanted = value.trim().toLowerCase()
+  const picked: Lang | null = ['en', 'english', '영어'].includes(wanted) ? 'en' : ['ko', 'korean', '한국어'].includes(wanted) ? 'ko' : null
+  if (!picked) return t(`No such language: ${value}. Pick en or ko`, `모르는 언어입니다: ${value}. en 또는 ko를 골라 주세요`)
+  await $.store.set('lang', picked)
+  lang = picked
+  return t('knock speaks English now.', '이제 knock이 한국어로 말합니다.')
 }
 
 // Friends and rooms this machine went to lately, newest first, for the menu and the typeahead.
@@ -556,6 +604,11 @@ async function chooseHome($: $, value: string) {
   if (value === 'friend' || value === 'room' || value === 'random' || value === 'me') return goto($, value)
 }
 
+async function pickLang($: $, value: string) {
+  const said = await setLang($, value)
+  await update($, MENU, menu => (menu ? { ...menu, note: menu.step === 'me' ? said : undefined } : null))
+}
+
 async function pickColor($: $, value: string) {
   const shown = await withServer($, () => setColor($, value))
   await update($, MENU, menu => (menu ? { ...menu, color: isColor(value) ? value : null, note: shown.text } : null))
@@ -570,7 +623,8 @@ async function submitName($: $, value: string) {
   const r = await api($, 'GET', '/me').catch(() => null)
   const step: MenuStep = before ? 'me' : 'home'
   const color = r?.status === 200 ? ((r.data?.color as string | null) ?? null) : null
-  await update($, MENU, menu => (menu ? { ...menu, step, color, note: `이름을 ${me}${ro(me)} 정했습니다.` } : null))
+  const note = t(`Your name is ${me}.`, `이름을 ${me}${ro(me)} 정했습니다.`)
+  await update($, MENU, menu => (menu ? { ...menu, step, color, note } : null))
 }
 
 // What `/knock ` completes, word by word: the subcommands and recent friends, then what each takes.
@@ -581,22 +635,26 @@ async function completions($: $, words: string[]): Promise<PromptAutocompleteSug
   const [first = '', second = ''] = words.map(word => word.toLowerCase())
   if (words.length === 1) {
     return [
-      ...starting(Object.keys(SUBCOMMANDS)).map(word => ({ text: word, description: SUBCOMMANDS[word as keyof typeof SUBCOMMANDS] })),
-      ...starting(recent.friends).map(name => ({ text: name, description: '최근 친구 · 노크' })),
+      ...starting(Object.keys(SUBCOMMANDS)).map(word => ({ text: word, description: SUBCOMMANDS[word as keyof typeof SUBCOMMANDS]() })),
+      ...starting(recent.friends).map(name => ({ text: name, description: t('recent friend · knock', '최근 친구 · 노크') })),
     ]
   }
-  if (words.length === 2 && first === 'room') return starting(recent.rooms).map(room => ({ text: room, description: '최근 방' }))
+  if (words.length === 2 && first === 'room') return starting(recent.rooms).map(room => ({ text: room, description: t('recent room', '최근 방') }))
   if (words.length === 2 && first === 'block') {
     const { value: chat } = await $.state.get(CHAT)
     const { value: me } = await $.state.get(ME)
     const names = [...new Set([...(chat?.members ?? []), ...(chat?.peer ? [chat.peer] : []), ...recent.friends])]
-    return starting(names.filter(name => name !== me)).map(name => ({ text: name, description: '차단' }))
+    return starting(names.filter(name => name !== me)).map(name => ({ text: name, description: t('block', '차단') }))
   }
   if (words.length === 2 && first === 'me') {
-    return starting(['color', 'name']).map(word => ({ text: word, description: word === 'color' ? '이름 색' : '이름 바꾸기' }))
+    const settingsOf = { color: t("your name's color", '이름 색'), name: t('change your name', '이름 바꾸기'), lang: t('language', '언어') }
+    return starting(Object.keys(settingsOf)).map(word => ({ text: word, description: settingsOf[word as keyof typeof settingsOf] }))
   }
   if (words.length === 3 && first === 'me' && second === 'color') {
-    return starting([...COLOR_KEYS.map(key => COLORS[key].label), '자동']).map(label => ({ text: label, description: '이름 색' }))
+    return starting([...COLOR_KEYS.map(colorName), t('auto', '자동')]).map(label => ({ text: label, description: t("your name's color", '이름 색') }))
+  }
+  if (words.length === 3 && first === 'me' && second === 'lang') {
+    return starting(['en', 'ko']).map(code => ({ text: code, description: code === 'en' ? 'English' : '한국어' }))
   }
   return []
 }
@@ -604,47 +662,45 @@ async function completions($: $, words: string[]): Promise<PromptAutocompleteSug
 async function init($: $, args: string): Promise<string> {
   const name = args.trim().toLowerCase()
   if (!name) return openMenu($, 'name')
-  if ((await $.state.get(CHAT)).value) return '대화 중에는 이름을 바꿀 수 없습니다. 먼저 /knock off 해 주세요.'
-  if (isSubcommand(name)) return `${name}은(는) /knock 명령어와 겹쳐서 이름으로 쓸 수 없습니다.`
+  if ((await $.state.get(CHAT)).value) return t('You cannot change your name mid-chat. /knock off first.', '대화 중에는 이름을 바꿀 수 없습니다. 먼저 /knock off 해 주세요.')
+  if (isSubcommand(name)) return t(`${name} is a /knock word, so it cannot be a name.`, `${name}은(는) /knock 명령어와 겹쳐서 이름으로 쓸 수 없습니다.`)
 
   const server = await serverOf($)
   const accounts = await accountsOf($, server)
   if (!accounts[name]) {
-    if (!NAME.test(name)) return NAME_RULE
+    if (!NAME.test(name)) return NAME_RULE()
     const r = await api($, 'POST', '/register', { name })
     if (r.status !== 200) {
-      return errorOf(r, { 400: NAME_RULE, 409: `이미 사용 중인 이름입니다: ${name}. 다른 이름을 정해 주세요.` })
+      return errorOf(r, { 400: NAME_RULE(), 409: t(`${name} is taken. Pick another name.`, `이미 사용 중인 이름입니다: ${name}. 다른 이름을 정해 주세요.`) })
     }
     accounts[name] = String(r.data?.token)
     await $.store.set(`accounts:${server}`, accounts)
   }
   await $.state.set(ME, name)
-  return say(`이름 설정 완료: ${name}`, '친구에게 노크: /knock <친구 이름>', '메뉴: /knock')
+  return say(t(`Your name is ${name}.`, `이름 설정 완료: ${name}`), t('Knock on a friend: /knock <name>', '친구에게 노크: /knock <친구 이름>'), t('Menu: /knock', '메뉴: /knock'))
 }
 
 // `/knock` alone: where things stand and what to do next.
 async function overview($: $, me: string): Promise<string> {
   const { value: chat } = await $.state.get(CHAT)
-  if (chat?.group) return say(groupLine(chat, me), '나가기: /knock off')
-  if (chat?.isConnected) {
-    return say(`${chat.isRandom ? '🎲' : '💬'} ${chat.peer} 님과 대화 중입니다.`, '끝내기: /knock off')
-  }
+  if (chat?.group) return say(groupLine(chat, me), t('Leave: /knock off', '나가기: /knock off'))
+  if (chat?.isConnected) return say(statusOf(chat, me), t('End: /knock off', '끝내기: /knock off'))
   const r = await api($, 'GET', '/knocks')
-  if (r.status !== 200) return `노크 목록을 가져오지 못했습니다: ${errorOf(r)}`
+  if (r.status !== 200) return t(`Could not get who knocked: ${errorOf(r)}`, `노크 목록을 가져오지 못했습니다: ${errorOf(r)}`)
   const from = (r.data?.from ?? []) as string[]
-  const knocked = `🚪 ${from.join(', ')} 님이 노크했습니다`
-  const connect = `연결: /knock ${from.length === 1 ? from[0] : '<이름>'}`
+  const knocked = `🚪 ${t(`${from.join(', ')} knocked`, `${from.join(', ')} 님이 노크했습니다`)}`
+  const connect = `${t('Connect', '연결')}: /knock ${from.length === 1 ? from[0] : t('<name>', '<이름>')}`
   if (chat) {
     return say(
-      chat.peer ? `⏳ ${chat.peer} 님을 기다리는 중입니다. (나: ${me})` : `🎲 ${lobbyOf(chat.room)}에서 상대를 찾는 중입니다. (나: ${me})`,
+      `${statusOf(chat, me)} (${t('me', '나')}: ${me})`,
       from.length > 0 && `${knocked}. ${connect}`,
     )
   }
-  if (from.length) return say(`${knocked}. (나: ${me})`, connect)
+  if (from.length) return say(`${knocked}. (${t('me', '나')}: ${me})`, connect)
   return say(
-    `노크한 사람이 없습니다. (나: ${me})`,
-    '친구에게 노크: /knock <친구 이름>',
-    '아무나 만나기: /knock random',
+    t(`No one knocked. (me: ${me})`, `노크한 사람이 없습니다. (나: ${me})`),
+    t('Knock on a friend: /knock <name>', '친구에게 노크: /knock <친구 이름>'),
+    t('Meet someone: /knock random', '아무나 만나기: /knock random'),
   )
 }
 
@@ -677,11 +733,11 @@ async function knock($: $, args: string): Promise<string> {
   if (!me) return noNameText(await accountsOf($, await serverOf($)))
   const to = args.trim().toLowerCase()
   if (!to) return overview($, me)
-  if (to === me) return '자기 자신에게는 노크할 수 없습니다.'
+  if (to === me) return t('You cannot knock on yourself.', '자기 자신에게는 노크할 수 없습니다.')
 
   const { value: before } = await $.state.get(CHAT)
   const r = await api($, 'POST', '/knock', { window: await $.session.id(), to })
-  if (r.status !== 200) return errorOf(r, { 404: `없는 이름입니다: ${to}. 친구의 knock 이름을 확인해 주세요.` })
+  if (r.status !== 200) return errorOf(r, { 404: t(`No one is named ${to}. Check your friend's knock name.`, `없는 이름입니다: ${to}. 친구의 knock 이름을 확인해 주세요.`) })
   // The server ended the chat this window was in; so does the window.
   if (before?.isConnected && before.peer !== to) await endChat($)
   await noteRecent($, 'friends', to)
@@ -692,11 +748,14 @@ async function knock($: $, args: string): Promise<string> {
   if (chat.isConnected) return connectedText(to)
   // Only a window that waits on a knock hears one, so the peer may not know yet.
   return r.data?.isNotified
-    ? say(`⏳ ${to} 님에게 노크했습니다.`, `알림이 전달되었습니다. ${to} 님이 /knock ${me} 하면 연결됩니다`)
+    ? say(
+        `⏳ ${t(`Knocked on ${to}.`, `${to} 님에게 노크했습니다.`)}`,
+        t(`They got a notice. When ${to} types /knock ${me}, you're connected`, `알림이 전달되었습니다. ${to} 님이 /knock ${me} 하면 연결됩니다`),
+      )
     : say(
-        `⏳ ${to} 님에게 노크했습니다.`,
-        `${to} 님이 지금 knock을 열어 두지 않아 알림이 가지 않았습니다`,
-        `${to} 님에게 /knock ${me} 해 달라고 직접 알려 주세요`,
+        `⏳ ${t(`Knocked on ${to}.`, `${to} 님에게 노크했습니다.`)}`,
+        t(`${to} has no knock window open, so they got no notice`, `${to} 님이 지금 knock을 열어 두지 않아 알림이 가지 않았습니다`),
+        t(`Ask ${to} to type /knock ${me}`, `${to} 님에게 /knock ${me} 해 달라고 직접 알려 주세요`),
       )
 }
 
@@ -705,7 +764,7 @@ async function knock($: $, args: string): Promise<string> {
 async function seek($: $, room: string): Promise<string> {
   const { value: before } = await $.state.get(CHAT)
   const r = await api($, 'POST', '/random', { window: await $.session.id(), room })
-  if (r.status !== 200) return errorOf(r, { 400: ROOM_RULE })
+  if (r.status !== 200) return errorOf(r, { 400: ROOM_RULE() })
   if (before) await endChat($)
   const peer = r.data?.state === 'connected' ? String(r.data.peer) : null
   const chat = { peer, isConnected: !!peer, isRandom: true, room }
@@ -713,21 +772,25 @@ async function seek($: $, room: string): Promise<string> {
   await showStatus($, chat)
   startLoop($)
   if (peer) return connectedText(peer, true)
-  return say(`🎲 ${lobbyOf(room)}에서 상대를 찾는 중입니다.`, '누군가 들어오면 바로 연결됩니다', '그만 찾기: /knock off')
+  return say(
+    `🎲 ${t(`Looking in ${lobbyOf(room)}.`, `${lobbyOf(room)}에서 상대를 찾는 중입니다.`)}`,
+    t('You connect as soon as someone comes', '누군가 들어오면 바로 연결됩니다'),
+    t('Stop: /knock off', '그만 찾기: /knock off'),
+  )
 }
 
 async function random($: $, args: string): Promise<string> {
   const { value: me } = await $.state.get(ME)
   if (!me) return noNameText(await accountsOf($, await serverOf($)))
   const room = args.trim().toLowerCase()
-  if (room && !ROOM.test(room)) return ROOM_RULE
+  if (room && !ROOM.test(room)) return ROOM_RULE()
   return seek($, room)
 }
 
 // Leaves a random match for the next one in the same lobby; the server skips the one left.
 async function nextMatch($: $): Promise<string> {
   const { value: chat } = await $.state.get(CHAT)
-  if (!chat?.isRandom) return say('랜덤 대화 중이 아닙니다.', '아무나 만나기: /knock random')
+  if (!chat?.isRandom) return say(t('Not in a random chat.', '랜덤 대화 중이 아닙니다.'), t('Meet someone: /knock random', '아무나 만나기: /knock random'))
   return seek($, chat.room ?? '')
 }
 
@@ -736,19 +799,24 @@ async function block($: $, args: string): Promise<string> {
   if (!me) return noNameText(await accountsOf($, await serverOf($)))
   const { value: chat } = await $.state.get(CHAT)
   const name = args.trim().toLowerCase() || (chat?.isConnected ? chat.peer : null)
-  if (!name) return say('차단할 사람이 없습니다.', '대화 중에 /knock block 하거나 /knock block <이름>으로 차단해 주세요')
+  if (!name) {
+    return say(
+      t('No one to block.', '차단할 사람이 없습니다.'),
+      t('Use /knock block in a chat, or /knock block <name>', '대화 중에 /knock block 하거나 /knock block <이름>으로 차단해 주세요'),
+    )
+  }
 
   const r = await api($, 'POST', '/block', { window: await $.session.id(), name })
   if (r.status !== 200) {
-    return errorOf(r, { 400: '자기 자신은 차단할 수 없습니다.', 404: `없는 이름입니다: ${name}` })
+    return errorOf(r, { 400: t('You cannot block yourself.', '자기 자신은 차단할 수 없습니다.'), 404: t(`No one is named ${name}`, `없는 이름입니다: ${name}`) })
   }
   const wasPeer = chat?.isConnected && chat.peer === name
   if (wasPeer) await endChat($)
   return say(
-    `🚫 ${name} 님을 차단했습니다.`,
-    wasPeer && '대화를 끝냈습니다',
-    '랜덤으로 다시 만나지 않고, 노크 알림과 방 메시지도 받지 않습니다',
-    wasPeer && chat.isRandom && `다른 상대 찾기: /knock random${chat.room ? ` ${chat.room}` : ''}`,
+    `🚫 ${t(`Blocked ${name}.`, `${name} 님을 차단했습니다.`)}`,
+    wasPeer && t('The chat ended', '대화를 끝냈습니다'),
+    t('You will not meet at random again, and their knocks and room messages do not reach you', '랜덤으로 다시 만나지 않고, 노크 알림과 방 메시지도 받지 않습니다'),
+    wasPeer && chat.isRandom && `${t('Find someone else', '다른 상대 찾기')}: /knock random${chat.room ? ` ${chat.room}` : ''}`,
   )
 }
 
@@ -769,7 +837,7 @@ async function carryOver($: $, oldId: string, me: string | null | undefined, cha
     : await api($, 'POST', '/knock', { window, to: chat.peer })
   if (r.status !== 200) {
     await showStatus($, null)
-    notice($, `대화 기록을 지우면서 연결이 끊겼습니다 (${errorOf(r)})`)
+    notice($, t(`The chat ended with the clear (${errorOf(r)})`, `대화 기록을 지우면서 연결이 끊겼습니다 (${errorOf(r)})`))
     return
   }
   const kept = chat.group
@@ -778,13 +846,13 @@ async function carryOver($: $, oldId: string, me: string | null | undefined, cha
   await $.state.set(CHAT, kept)
   await showStatus($, kept)
   startLoop($)
-  notice($, say('대화 기록을 지웠습니다. 채팅은 그대로 이어집니다.', '끝내기: /knock off'))
+  notice($, say(t('History cleared. The chat goes on.', '대화 기록을 지웠습니다. 채팅은 그대로 이어집니다.'), t('End: /knock off', '끝내기: /knock off')))
 }
 
 // Who else is in the room, or that no one is yet.
 function groupLine(chat: Chat, me: string | null | undefined) {
   const others = (chat.members ?? []).filter(name => name !== me)
-  return `👥 '${chat.group}' 방 (${countOf(chat)}): ${others.length ? others.join(', ') : '아직 아무도 없습니다'}`
+  return `👥 ${t(`room '${chat.group}'`, `'${chat.group}' 방`)} (${countOf(chat)}): ${others.length ? others.join(', ') : t('no one yet', '아직 아무도 없습니다')}`
 }
 
 // Joins the group room `args`, leaving any chat this window is in; alone, says who is in the room.
@@ -795,16 +863,16 @@ async function room($: $, args: string): Promise<string> {
   const { value: before } = await $.state.get(CHAT)
   if (!group) {
     return before?.group
-      ? say(groupLine(before, me), '나가기: /knock off')
-      : say('들어가 있는 방이 없습니다.', '방에 들어가기: /knock room <방이름>')
+      ? say(groupLine(before, me), t('Leave: /knock off', '나가기: /knock off'))
+      : say(t('You are in no room.', '들어가 있는 방이 없습니다.'), t('Join one: /knock room <room>', '방에 들어가기: /knock room <방이름>'))
   }
-  if (!ROOM.test(group)) return GROUP_RULE
+  if (!ROOM.test(group)) return GROUP_RULE()
 
   const r = await api($, 'POST', '/room', { window: await $.session.id(), room: group })
   if (r.status !== 200) {
-    return errorOf(r, { 400: GROUP_RULE, 409: `'${group}' 방이 가득 찼습니다. (${GROUP_MAX}/${GROUP_MAX})` })
+    return errorOf(r, { 400: GROUP_RULE(), 409: `${t(`Room '${group}' is full.`, `'${group}' 방이 가득 찼습니다.`)} (${GROUP_MAX}/${GROUP_MAX})` })
   }
-  if (before?.group === group) return say(groupLine(before, me), '나가기: /knock off')
+  if (before?.group === group) return say(groupLine(before, me), t('Leave: /knock off', '나가기: /knock off'))
   if (before) await endChat($)
   const members = (r.data?.members ?? [me]) as string[]
   const others = members.filter(name => name !== me)
@@ -814,33 +882,39 @@ async function room($: $, args: string): Promise<string> {
   await showStatus($, chat)
   startLoop($)
   return say(
-    `👥 '${group}' 방에 들어왔습니다. (${countOf(chat)})`,
-    others.length ? `지금 있는 사람: ${others.join(', ')}` : `아직 아무도 없습니다. 친구에게 /knock room ${group} 을 알려 주세요`,
-    '입력하면 방 전체에 전달됩니다 · @claude 로 시작하면 Claude가 답합니다 · 나가기: /knock off',
+    `👥 ${t(`You're in room '${group}'.`, `'${group}' 방에 들어왔습니다.`)} (${countOf(chat)})`,
+    others.length
+      ? `${t('Here', '지금 있는 사람')}: ${others.join(', ')}`
+      : t(`No one yet. Tell friends to type /knock room ${group}`, `아직 아무도 없습니다. 친구에게 /knock room ${group} 을 알려 주세요`),
+    t(
+      'What you type goes to the whole room · start with @claude and Claude answers · Leave: /knock off',
+      '입력하면 방 전체에 전달됩니다 · @claude 로 시작하면 Claude가 답합니다 · 나가기: /knock off',
+    ),
   )
 }
 
 async function leave($: $): Promise<string> {
   const { value: chat } = await $.state.get(CHAT)
-  if (!chat) return '연결된 사람이 없습니다.'
+  if (!chat) return t('Not connected to anyone.', '연결된 사람이 없습니다.')
   await endChat($)
   await api($, 'POST', '/leave', { window: await $.session.id() }).catch(() => undefined)
-  if (chat.group) return `'${chat.group}' 방에서 나왔습니다. 다시 Claude와 대화합니다.`
-  if (!chat.peer) return '상대 찾기를 그만두었습니다.'
-  return `${chat.peer} 님과의 연결을 끊었습니다. 다시 Claude와 대화합니다.`
+  if (chat.group) return t(`Left room '${chat.group}'. Back to Claude.`, `'${chat.group}' 방에서 나왔습니다. 다시 Claude와 대화합니다.`)
+  if (!chat.peer) return t('Stopped looking.', '상대 찾기를 그만두었습니다.')
+  return t(`Disconnected from ${chat.peer}. Back to Claude.`, `${chat.peer} 님과의 연결을 끊었습니다. 다시 Claude와 대화합니다.`)
 }
 
 const withServer = async ($: $, run: () => Promise<string>) => {
   try {
     return { text: await run() }
   } catch {
-    return { text: `knock 서버에 연결하지 못했습니다 (${await serverOf($)})` }
+    return { text: t(`Could not reach the knock server (${await serverOf($)})`, `knock 서버에 연결하지 못했습니다 (${await serverOf($)})`) }
   }
 }
 
 // Mid-turn a command's output only draws once the turn ends, and a chat turn listens on:
 // say it as a notice then.
 async function answer($: $, run: () => Promise<string>) {
+  await loadLang($)
   const shown = await withServer($, run)
   // An empty text is a pane that opened: no output row for it.
   if (!runningTurns.size) return shown.text ? shown : {}
@@ -851,46 +925,47 @@ async function answer($: $, run: () => Promise<string>) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    await loadLang($)
     // Immediate, so they also run during a chat turn, which listens until the person types.
     await Promise.all([
       $.command.register({
         name: 'knock-init',
-        description: '내 이름 정하기 (처음 쓰는 이름이면 등록됩니다)',
-        argumentHint: '<이름>',
+        description: 'Pick your name',
+        argumentHint: '<name>',
         immediate: true,
       }),
       $.command.register({
         name: 'knock',
-        description: 'knock 메뉴 · /knock <친구>로 바로 노크 · room, random, me, off 도 받습니다',
-        argumentHint: '[친구 이름 | room | random | next | block | me | off]',
+        description: 'knock menu · /knock <friend> knocks at once · also room, random, me, off',
+        argumentHint: '[friend | room | random | next | block | me | off]',
         immediate: true,
       }),
       $.command.register({
         name: 'knock-random',
-        description: '랜덤으로 아무나 만나기 · 코드를 붙이면 같은 코드를 쓴 사람끼리만',
-        argumentHint: '[대기실 코드]',
+        description: 'Meet someone at random',
+        argumentHint: '[code]',
         immediate: true,
       }),
-      $.command.register({ name: 'knock-next', description: '지금 랜덤 상대와 끊고 다음 상대 찾기', immediate: true }),
+      $.command.register({ name: 'knock-next', description: 'Next random match', immediate: true }),
       $.command.register({
         name: 'knock-room',
-        description: `여러 명이 함께 쓰는 방에 들어가기 (최대 ${GROUP_MAX}명) · 이름 없이 입력하면 지금 방과 참가자`,
-        argumentHint: '[방이름]',
+        description: 'Join a group room',
+        argumentHint: '[room]',
         immediate: true,
       }),
       $.command.register({
         name: 'knock-block',
-        description: '지금 상대(또는 이름)를 차단하기 · 랜덤으로 다시 만나지 않고, 노크 알림과 방 메시지도 받지 않습니다',
-        argumentHint: '[이름]',
+        description: 'Block someone',
+        argumentHint: '[name]',
         immediate: true,
       }),
       $.command.register({
         name: 'knock-me',
-        description: '내 정보와 설정 · color: 이름 색 고르기 · name: 이름 바꾸기',
-        argumentHint: '[color [색] | name <이름>]',
+        description: 'Your settings',
+        argumentHint: '[color | name | lang]',
         immediate: true,
       }),
-      $.command.register({ name: 'knock-off', description: '연결을 끊고 다시 Claude와 대화하기', immediate: true }),
+      $.command.register({ name: 'knock-off', description: 'End the chat', immediate: true }),
     ])
 
     // A new window is the one name this machine holds; with several it waits for /knock me name,
@@ -904,7 +979,7 @@ export const register: Register = on => {
     // The first window after install says where to start, once per server.
     if (!names.length && !(await $.store.get(`welcomed:${server}`))) {
       await $.store.set(`welcomed:${server}`, true)
-      notice($, say('🚪 knock이 설치되었습니다.', '시작: /knock'))
+      notice($, say(t('🚪 knock is installed.', '🚪 knock이 설치되었습니다.'), t('Start: /knock', '시작: /knock')))
     }
     // After a hot reload the chat is still on: pick its poll loop back up.
     const { value: chat } = await $.state.get(CHAT)
@@ -931,7 +1006,17 @@ export const register: Register = on => {
   // The commands /knock took over: they still run, typed in full, but leave the typeahead to it.
   on('command.describe', async ($, e, next) => {
     const described = await next(e)
-    return e.command.startsWith('knock-') ? { ...described, isHidden: true } : described
+    if (e.command.startsWith('knock-')) return { ...described, isHidden: true }
+    if (e.command !== 'knock') return described
+    await loadLang($)
+    return {
+      ...described,
+      description: t(
+        'knock menu · /knock <friend> knocks at once · also room, random, me, off',
+        'knock 메뉴 · /knock <친구>로 바로 노크 · room, random, me, off 도 받습니다',
+      ),
+      argumentHint: t('[friend | room | random | next | block | me | off]', '[친구 이름 | room | random | next | block | me | off]'),
+    }
   })
 
   on('prompt.autocomplete', async ($, e, next) => {
@@ -951,7 +1036,7 @@ export const register: Register = on => {
     const { value: me } = await $.state.get(ME)
     const { value: chat } = await $.state.get(CHAT)
     if (!menu || !Select || !Input) {
-      return <Text dimColor>{'/knock <친구> · /knock room <방> · /knock random · /knock me · /knock off'}</Text>
+      return <Text dimColor>{t('/knock <friend> · /knock room <room> · /knock random · /knock me · /knock off', '/knock <친구> · /knock room <방> · /knock random · /knock me · /knock off')}</Text>
     }
     const mine = me ? COLORS[colorFor(me, menu.color)] : null
     const header = me ? (
@@ -962,13 +1047,26 @@ export const register: Register = on => {
         {` · ${statusOf(chat, me)}`}
       </Text>
     ) : (
-      <Text weight="bold">🚪 knock에 오신 것을 환영합니다</Text>
+      <Text weight="bold">{t('🚪 Welcome to knock', '🚪 knock에 오신 것을 환영합니다')}</Text>
     )
     const note = menu.note ? <Text dimColor>{menu.note}</Text> : null
-    const back = <Button key="back" label="← 처음으로" onPress={() => void goto($, 'home')} />
+    const back = <Button key="back" label={t('← Back', '← 처음으로')} onPress={() => void goto($, 'home')} />
+    // English or Korean: the words change as soon as one is picked.
+    const language = (
+      <Select
+        key="lang"
+        label="Language / 언어"
+        options={[
+          { value: 'en', label: 'English' },
+          { value: 'ko', label: '한국어' },
+        ]}
+        value={lang}
+        onSelect={(value: string) => void pickLang($, value)}
+      />
+    )
     const pickRecent = (key: string, list: string[], run: (value: string) => Promise<string>) =>
       list.length > 0 ? (
-        <Select key={key} label="최근" options={list.map(one => ({ value: one, label: one }))} value={list[0]} onSelect={(value: string) => void act($, () => run(value))} />
+        <Select key={key} label={t('Recent', '최근')} options={list.map(one => ({ value: one, label: one }))} value={list[0]} onSelect={(value: string) => void act($, () => run(value))} />
       ) : null
 
     if (menu.step === 'friend') {
@@ -976,9 +1074,9 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {header}
-          <Input key="friend" label="친구 이름" placeholder="예: bob" submitLabel="노크" autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
+          <Input key="friend" label={t("Friend's name", '친구 이름')} placeholder={t('e.g. bob', '예: bob')} submitLabel={t('Knock', '노크')} autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
           {pickRecent('friends', names, value => knock($, value))}
-          <Text dimColor>서로 노크하면 연결됩니다.</Text>
+          <Text dimColor>{t('Knock on each other to connect.', '서로 노크하면 연결됩니다.')}</Text>
           {back}
         </Box>
       )
@@ -987,9 +1085,14 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {header}
-          <Input key="room" label="방 이름" placeholder="예: 점심팟-7k2q" submitLabel="들어가기" autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
+          <Input key="room" label={t('Room', '방 이름')} placeholder={t('e.g. lunch-7k2q', '예: 점심팟-7k2q')} submitLabel={t('Join', '들어가기')} autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
           {pickRecent('rooms', menu.rooms, value => room($, value))}
-          <Text dimColor>{`같은 이름을 입력한 사람끼리 최대 ${GROUP_MAX}명. 남이 맞히기 어려운 이름이면 아는 사람끼리만 씁니다.`}</Text>
+          <Text dimColor>
+            {t(
+              `Up to ${GROUP_MAX} people who type the same name. A name no one would guess keeps it to people you tell.`,
+              `같은 이름을 입력한 사람끼리 최대 ${GROUP_MAX}명. 남이 맞히기 어려운 이름이면 아는 사람끼리만 씁니다.`,
+            )}
+          </Text>
           {back}
         </Box>
       )
@@ -998,8 +1101,8 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {header}
-          <Input key="lobby" label="대기실 코드" placeholder="비워 두면 전체 대기실" submitLabel="찾기" autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
-          <Text dimColor>코드를 넣으면 같은 코드를 입력한 사람끼리만 만납니다.</Text>
+          <Input key="lobby" label={t('Lobby code', '대기실 코드')} placeholder={t('empty for the open lobby', '비워 두면 전체 대기실')} submitLabel={t('Find', '찾기')} autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
+          <Text dimColor>{t('With a code, you only meet people who typed the same one.', '코드를 넣으면 같은 코드를 입력한 사람끼리만 만납니다.')}</Text>
           {back}
         </Box>
       )
@@ -1015,21 +1118,22 @@ export const register: Register = on => {
               <Text color={COLORS[key].hex} weight="bold">
                 {me}
               </Text>
-              {` 오늘 점심 뭐 먹지 · ${COLORS[key].label}${key === current ? ' (지금)' : ''}`}
+              {` ${t('lunch, anyone?', '오늘 점심 뭐 먹지')} · ${colorName(key)}${key === current ? t(' (now)', ' (지금)') : ''}`}
             </Text>
           ))}
           <Select
             key="color"
-            label="이름 색"
+            label={t("Name's color", '이름 색')}
             autoFocus
             options={[
-              ...COLOR_KEYS.map(key => ({ value: key, label: COLORS[key].label })),
-              { value: 'auto', label: `자동 (${COLORS[colorFor(me)].label})` },
+              ...COLOR_KEYS.map(key => ({ value: key, label: colorName(key) })),
+              { value: 'auto', label: `${t('auto', '자동')} (${colorName(colorFor(me))})` },
             ]}
             value={isColor(menu.color) ? menu.color : 'auto'}
             onSelect={(value: string) => void pickColor($, value)}
           />
-          <Button key="rename" label="이름 바꾸기" onPress={() => void goto($, 'name')} />
+          {language}
+          <Button key="rename" label={t('Change name', '이름 바꾸기')} onPress={() => void goto($, 'name')} />
           {back}
         </Box>
       )
@@ -1038,28 +1142,35 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {header}
-          <Text>{me ? '새 이름을 입력하세요. 처음 쓰는 이름이면 새로 등록됩니다.' : '먼저 knock에서 쓸 이름을 정하세요. 친구가 이 이름으로 노크합니다.'}</Text>
-          {menu.note ? <Text color="#d9534f">{menu.note}</Text> : <Text dimColor>{NAME_RULE}</Text>}
-          <Input key="name" label="이름" placeholder="예: alice" submitLabel="정하기" autoFocus onSubmit={(value: string) => void submitName($, value)} />
+          {me ? null : language}
+          <Text>
+            {me
+              ? t('Type a new name. A name no one has used yet is registered for you.', '새 이름을 입력하세요. 처음 쓰는 이름이면 새로 등록됩니다.')
+              : t('First, pick the name you use on knock. Friends knock on you by it.', '먼저 knock에서 쓸 이름을 정하세요. 친구가 이 이름으로 노크합니다.')}
+          </Text>
+          {menu.note ? <Text color="#d9534f">{menu.note}</Text> : <Text dimColor>{NAME_RULE()}</Text>}
+          <Input key="name" label={t('Name', '이름')} placeholder={t('e.g. alice', '예: alice')} submitLabel={t('Save', '정하기')} autoFocus onSubmit={(value: string) => void submitName($, value)} />
           {me ? back : null}
         </Box>
       )
     }
 
     const options = [
-      ...menu.knocks.slice(0, 3).map(name => ({ value: `knock:${name}`, label: `🚪 ${name} 님과 연결하기 (노크 받음)` })),
-      { value: 'friend', label: '친구에게 노크' },
-      { value: 'random', label: '아무나 만나기' },
-      { value: 'room', label: '방 들어가기' },
-      { value: 'me', label: '내 설정 (이름·색)' },
-      ...(chat ? [{ value: 'off', label: chat.group ? '방에서 나가기' : chat.isConnected ? '대화 끝내기' : '기다리기 그만두기' }] : []),
+      ...menu.knocks.slice(0, 3).map(name => ({ value: `knock:${name}`, label: `🚪 ${t(`Connect with ${name} (knocked)`, `${name} 님과 연결하기 (노크 받음)`)}` })),
+      { value: 'friend', label: t('Knock on a friend', '친구에게 노크') },
+      { value: 'random', label: t('Meet someone at random', '아무나 만나기') },
+      { value: 'room', label: t('Join a room', '방 들어가기') },
+      { value: 'me', label: t('Settings (name, color, language)', '내 설정 (이름·색·언어)') },
+      ...(chat
+        ? [{ value: 'off', label: chat.group ? t('Leave the room', '방에서 나가기') : chat.isConnected ? t('End the chat', '대화 끝내기') : t('Stop waiting', '기다리기 그만두기') }]
+        : []),
     ]
     return (
       <Box flexDirection="column">
         {header}
         {note}
-        <Select key="home" label="무엇을 할까요" autoFocus options={options} value={options[0]?.value} onSelect={(value: string) => void chooseHome($, value)} />
-        <Text dimColor>↑↓로 고르고 Enter · Esc로 닫기 · 바로 쓰기: /knock bob, /knock room 점심팟</Text>
+        <Select key="home" label={t('What next', '무엇을 할까요')} autoFocus options={options} value={options[0]?.value} onSelect={(value: string) => void chooseHome($, value)} />
+        <Text dimColor>{t('↑↓ then Enter · Esc closes · Or type: /knock bob, /knock room lunch', '↑↓로 고르고 Enter · Esc로 닫기 · 바로 쓰기: /knock bob, /knock room 점심팟')}</Text>
       </Box>
     )
   })
@@ -1089,8 +1200,10 @@ export const register: Register = on => {
         )
         return {
           drop:
-            `knock: 랜덤이나 방에서 만난 ${namesOf(strangers)} 님과의 대화가 이 창 기록에 남아 있어, Claude가 함께 읽습니다. ` +
-            '/clear 하거나 새 창에서 요청하세요. 그대로 보내려면 한 번 더 Enter를 누르세요.',
+            `knock: ${t(
+              `Your chat with ${namesOf(strangers)}, met at random or in a room, is still in this window's history, and Claude reads it too. /clear or use a new window. Press Enter again to send it anyway.`,
+              `랜덤이나 방에서 만난 ${namesOf(strangers)} 님과의 대화가 이 창 기록에 남아 있어, Claude가 함께 읽습니다. /clear 하거나 새 창에서 요청하세요. 그대로 보내려면 한 번 더 Enter를 누르세요.`,
+            )}`,
         }
       }
       await Promise.all([$.state.set(RELAYED, []), $.state.set(STRANGERS, [])])
@@ -1100,14 +1213,17 @@ export const register: Register = on => {
     const r = await api($, 'POST', '/send', { window: await $.session.id(), text: e.text })
     if (r.status !== 200) {
       if (r.status === 409) await endChat($)
-      const why = errorOf(r, { 409: '연결이 끊겨 보내지 못했습니다', 400: `메시지는 ${MAX_TEXT}자까지 보낼 수 있습니다` })
+      const why = errorOf(r, {
+        409: t('Not sent: the chat ended', '연결이 끊겨 보내지 못했습니다'),
+        400: t(`A message is up to ${MAX_TEXT} characters`, `메시지는 ${MAX_TEXT}자까지 보낼 수 있습니다`),
+      })
       return { drop: `knock: ${why}` }
     }
     if (chat.group && !(r.data?.to as string[] | undefined)?.length) {
-      notice($, '아직 방에 아무도 없어 전달되지 않았습니다.')
+      notice($, t('No one else is in the room yet, so no one got it.', '아직 방에 아무도 없어 전달되지 않았습니다.'))
     }
     const { value: me } = await $.state.get(ME)
-    remember(me ?? '나', e.text)
+    remember(me ?? 'me', e.text)
     pendingTurns.push(e.text)
     const submitted = await next(e)
     // Typed over a chat turn: end that turn, or the engine slips this message into it as a
@@ -1118,7 +1234,7 @@ export const register: Register = on => {
     // Once that turn is gone: a model call is cut when the turn running beside it is aborted.
     if (me && ASK.test(e.text)) $.clock.after(300, () => void askClaude($, me, chat))
     return submitted
-  }).catch(($, e, next) => (next.called ? next(e) : { drop: 'knock: 메시지를 보내지 못했습니다. 다시 보내 주세요.' }))
+  }).catch(($, e, next) => (next.called ? next(e) : { drop: `knock: ${t('Could not send. Try again.', '메시지를 보내지 못했습니다. 다시 보내 주세요.')}` }))
 
   // A slash command typed over a chat turn (/clear, /compact) is queued behind it with no
   // prompt.submit, and a chat turn listens on. The box emptied with nothing submitted or run
