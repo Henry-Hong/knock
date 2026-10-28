@@ -993,7 +993,7 @@ function unreadable(path: string, why: string) {
 async function openViewer($: $): Promise<string> {
   if (!pictures.length) return t('No pictures yet. Send one in a chat: /knock pic <path to a PNG>', '아직 사진이 없습니다. 채팅 중에 보내기: /knock pic <PNG 경로>')
   const { value: viewer } = await $.state.get(VIEWER)
-  await $.state.set(VIEWER, { index: 0, seq: (viewer?.seq ?? 0) + 1 })
+  await $.state.set(VIEWER, { index: 0, seq: (viewer?.seq ?? 0) + 1, isSharp: false })
   const opened = await $.ui.open({ id: PICTURE_PANE, title: '📷', focus: true, closeOnEscape: true, rows: 24 })
   return opened.isPlaced ? '' : t('Could not open the picture viewer here.', '여기서는 사진 보기 창을 열 수 없습니다.')
 }
@@ -1758,16 +1758,16 @@ export const register: Register = on => {
           <Text dimColor>{` · ${index + 1}/${pictures.length} · Esc ${t('closes', '닫기')}`}</Text>
         </Text>
         {picture}
+        {older && <Button key="older" plain hotkey="o" autoFocus label={t('older picture', '이전 사진')} onPress={() => void showPicture($, index + 1)} />}
+        {newer && <Button key="newer" plain hotkey="n" autoFocus={older ? undefined : true} label={t('newer picture', '다음 사진')} onPress={() => void showPicture($, index - 1)} />}
+        {/* Never focused first: an Enter meant for something else would switch the view. */}
         <Button
           key="sharp"
           plain
           hotkey="g"
-          autoFocus
           label={isSharp ? t('block view (any terminal)', '블록 보기 (모든 터미널)') : t('sharp view (iTerm2, Ghostty, kitty)', '선명하게 보기 (iTerm2, Ghostty, kitty)')}
           onPress={() => void update($, VIEWER, current => (current ? { ...current, isSharp: !current.isSharp } : null))}
         />
-        {older && <Button key="older" plain hotkey="o" label={t('older picture', '이전 사진')} onPress={() => void showPicture($, index + 1)} />}
-        {newer && <Button key="newer" plain hotkey="n" label={t('newer picture', '다음 사진')} onPress={() => void showPicture($, index - 1)} />}
       </Box>
     )
   })
