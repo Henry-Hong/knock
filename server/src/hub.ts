@@ -15,12 +15,14 @@ const NAME = /^[a-z0-9][a-z0-9_-]{1,19}$/
 // are named the same way, without the empty one.
 const ROOM = /^[^\s\p{Cc}]{0,32}$/u
 const GROUP_MAX = 8
+// The colors a name can be drawn in; the client picks the shades.
+const COLORS = ['red', 'orange', 'yellow', 'green', 'sky', 'blue', 'purple', 'pink']
 
 export type KnockEvent =
   | { type: 'connected'; peer: string; isRandom: boolean }
   | { type: 'knocked'; from: string }
-  // `group` is set when it was said in a group room.
-  | { type: 'message'; from: string; text: string; at: number; group?: string }
+  // `group` is set when it was said in a group room, with the sender's `color` if they picked one.
+  | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string }
   | { type: 'left'; peer: string; reason: 'left' | 'timeout' }
   // Someone came into or went out of this window's group room; count is how many are in it now.
   | { type: 'joined'; name: string; count: number }
@@ -68,6 +70,8 @@ export class Hub extends DurableObject<Env> {
     ctx.storage.sql.exec(
       'CREATE TABLE IF NOT EXISTS blocks (blocker TEXT NOT NULL, blocked TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (blocker, blocked))',
     )
+    const columns = ctx.storage.sql.exec('PRAGMA table_info(users)').toArray().map(column => column.name)
+    if (!columns.includes('color')) ctx.storage.sql.exec('ALTER TABLE users ADD COLUMN color TEXT')
   }
 
   async register(name: string): Promise<Result<{ name: string; token: string }>> {
@@ -167,6 +171,21 @@ export class Hub extends DurableObject<Env> {
     return ok({ group, members: [...room] })
   }
 
+  async me(token: string): Promise<Result<{ name: string; color: string | null }>> {
+    const me = await this.auth(token)
+    if (!me) return fail(401, 'unknown token')
+    return ok({ name: me, color: this.colorOf(me) })
+  }
+
+  // Sets the color this user's name is drawn in; '' goes back to none picked.
+  async setColor(token: string, color: string): Promise<Result<{ name: string; color: string | null }>> {
+    const me = await this.auth(token)
+    if (!me) return fail(401, 'unknown token')
+    if (color && !COLORS.includes(color)) return fail(400, `color must be one of ${COLORS.join(', ')}`)
+    this.ctx.storage.sql.exec('UPDATE users SET color = ? WHERE name = ?', color || null, me)
+    return ok({ name: me, color: color || null })
+  }
+
   // Keeps `name` out of this user's random matches and knock notices. A chat with them ends.
   async block(token: string, window: string, name: string): Promise<Result<{ blocked: string }>> {
     const me = await this.auth(token)
@@ -210,7 +229,8 @@ export class Hub extends DurableObject<Env> {
     const group = live.group!
     const blocked = this.blocked(me)
     const to = [...(this.groups.get(group) ?? [])].filter(name => name !== me && !blocked.has(name))
-    for (const name of to) this.push(name, { type: 'message', from: me, text, at, group })
+    const color = this.colorOf(me) ?? undefined
+    for (const name of to) this.push(name, { type: 'message', from: me, text, at, group, color })
     return ok({ to })
   }
 
@@ -269,6 +289,11 @@ export class Hub extends DurableObject<Env> {
       this.ctx.storage.sql.exec('SELECT 1 FROM blocks WHERE blocker = ? AND blocked = ?', blocker, blocked).toArray()
         .length > 0
     )
+  }
+
+  private colorOf(name: string): string | null {
+    const row = this.ctx.storage.sql.exec('SELECT color FROM users WHERE name = ?', name).toArray()[0]
+    return (row?.color as string | null | undefined) ?? null
   }
 
   private async auth(token: string): Promise<string | null> {

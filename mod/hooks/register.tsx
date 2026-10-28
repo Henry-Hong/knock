@@ -135,8 +135,46 @@ const relayNote = (peers: string[], strangers: string[]) =>
 // pass for Claude Code's own rows; newlines and tabs stay.
 const clean = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
 
-// In a group room each line says who said it.
-const lineOf = (m: Message) => (m.group ? `**${m.from}** ${m.text}` : m.text)
+// The colors a name is drawn in (the server keeps the key): mid shades that read on dark and
+// light themes alike.
+const COLORS = {
+  red: { label: '빨강', hex: '#d9534f' },
+  orange: { label: '주황', hex: '#e07b28' },
+  yellow: { label: '노랑', hex: '#b8961e' },
+  green: { label: '초록', hex: '#3a9a4a' },
+  sky: { label: '하늘', hex: '#2b9cc0' },
+  blue: { label: '파랑', hex: '#4a78d0' },
+  purple: { label: '보라', hex: '#8a63c9' },
+  pink: { label: '분홍', hex: '#cf5a9a' },
+} as const
+type ColorKey = keyof typeof COLORS
+const COLOR_KEYS = Object.keys(COLORS) as ColorKey[]
+const isColor = (key: unknown): key is ColorKey => typeof key === 'string' && COLOR_KEYS.includes(key as ColorKey)
+
+// Someone who picked none is drawn in a color their name picks, the same in every window.
+function colorFor(name: string, picked?: string | null): ColorKey {
+  if (isColor(picked)) return picked
+  let sum = 0
+  for (const ch of name) sum = (sum * 31 + (ch.codePointAt(0) ?? 0)) >>> 0
+  return COLOR_KEYS[sum % COLOR_KEYS.length] ?? 'blue'
+}
+
+// A terminal color code around `text`, which a chat turn's answer draws as it is.
+function paint(text: string, key: ColorKey) {
+  const hex = COLORS[key].hex
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16))
+  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`
+}
+
+// 으로 or 로, as the word ends.
+function ro(word: string) {
+  const code = (word.codePointAt(word.length - 1) ?? 0) - 0xac00
+  const last = code >= 0 && code < 11172 ? code % 28 : 0
+  return last === 0 || last === 8 ? '로' : '으로'
+}
+
+// In a group room each line says who said it, in their color.
+const lineOf = (m: Message) => (m.group ? `${paint(`**${m.from}**`, colorFor(m.from, m.color))} ${m.text}` : m.text)
 
 function startLoop($: $) {
   const id = ++loop
@@ -345,13 +383,16 @@ function noNameText(accounts: Record<string, string>) {
   )
 }
 
-async function whoami($: $): Promise<string> {
+// `/knock-me` alone: who I am, where, in what color, and how to change those.
+async function profile($: $): Promise<string> {
   const server = await serverOf($)
   const { value: me } = await $.state.get(ME)
   if (!me) return noNameText(await accountsOf($, server))
   const { value: chat } = await $.state.get(CHAT)
+  const r = await api($, 'GET', '/me')
+  const picked = r.status === 200 ? (r.data?.color as string | null) : null
   return say(
-    `나: ${me}`,
+    `나: ${me} (색: ${COLORS[colorFor(me, picked)].label}${isColor(picked) ? '' : ', 자동'})`,
     !!chat &&
       (chat.group
         ? groupLine(chat, me)
@@ -361,12 +402,56 @@ async function whoami($: $): Promise<string> {
             ? `⏳ ${chat.peer} 님 기다리는 중`
             : `🎲 ${lobbyOf(chat.room)}에서 상대 찾는 중`),
     server !== DEFAULT_SERVER && `서버: ${server}`,
+    '색 바꾸기: /knock-me color · 이름 바꾸기: /knock-me name <이름>',
   )
+}
+
+// `/knock-me <setting> [value]`: the person's own settings, in one place.
+async function settings($: $, args: string): Promise<string> {
+  const [setting = '', ...rest] = args.trim().split(/\s+/)
+  const value = rest.join(' ')
+  if (setting === 'name' || setting === '이름') return value ? init($, value) : '바꿀 이름을 붙여 주세요: /knock-me name <이름>'
+  if (setting === 'color' || setting === '색') return value ? setColor($, value) : openPicker($)
+  if (setting) return say(`모르는 설정입니다: ${setting}`, '색: /knock-me color · 이름: /knock-me name <이름>')
+  return profile($)
+}
+
+const COLOR_LIST = `${COLOR_KEYS.map(key => COLORS[key].label).join(' ')} 자동`
+
+async function setColor($: $, value: string): Promise<string> {
+  const { value: me } = await $.state.get(ME)
+  if (!me) return noNameText(await accountsOf($, await serverOf($)))
+  const wanted = value.trim().toLowerCase()
+  const key = COLOR_KEYS.find(k => k === wanted || COLORS[k].label === wanted)
+  if (!key && wanted !== '자동' && wanted !== 'auto') return say(`모르는 색입니다: ${value}`, `고를 수 있는 색: ${COLOR_LIST}`)
+  const r = await api($, 'POST', '/me', { color: key ?? '' })
+  if (r.status !== 200) return errorOf(r)
+  const label = COLORS[colorFor(me, key)].label
+  return key ? `이름 색을 ${label}${ro(label)} 바꿨습니다.` : `이름 색을 자동(${label})${ro(label)} 되돌렸습니다.`
+}
+
+// The color picker: a dialog pane that draws the name in every color, and a Select to pick one.
+const PICKER = 'knock-color'
+let picking: { me: string; picked: string | null } | null = null
+
+async function openPicker($: $): Promise<string> {
+  const { value: me } = await $.state.get(ME)
+  if (!me) return noNameText(await accountsOf($, await serverOf($)))
+  const r = await api($, 'GET', '/me')
+  picking = { me, picked: r.status === 200 ? ((r.data?.color as string | null) ?? null) : null }
+  const opened = await $.ui.open({ id: PICKER, title: '이름 색', focus: true, closeOnEscape: true, holdToasts: true, rows: 12 })
+  if (!opened.isPlaced) return say('색을 고르는 창을 열 수 없습니다.', `바로 고르기: /knock-me color <색> (${COLOR_LIST})`)
+  return '이름 색을 고르는 창을 열었습니다.'
+}
+
+async function pick($: $, value: string) {
+  await $.ui.close({ id: PICKER }).catch(() => undefined)
+  notice($, await withServer($, () => setColor($, value)).then(shown => shown.text))
 }
 
 async function init($: $, args: string): Promise<string> {
   const name = args.trim().toLowerCase()
-  if (!name) return whoami($)
+  if (!name) return profile($)
   if ((await $.state.get(CHAT)).value) return '대화 중에는 이름을 바꿀 수 없습니다. 먼저 /knock-off 해 주세요.'
 
   const server = await serverOf($)
@@ -619,7 +704,12 @@ export const register: Register = on => {
         argumentHint: '[이름]',
         immediate: true,
       }),
-      $.command.register({ name: 'knock-me', description: '내 이름과 지금 대화 상대 보기', immediate: true }),
+      $.command.register({
+        name: 'knock-me',
+        description: '내 정보와 설정 · color: 이름 색 고르기 · name: 이름 바꾸기',
+        argumentHint: '[color [색] | name <이름>]',
+        immediate: true,
+      }),
       $.command.register({ name: 'knock-off', description: '연결을 끊고 다시 Claude와 대화하기', immediate: true }),
     ])
 
@@ -656,7 +746,45 @@ export const register: Register = on => {
   on('command.run', { command: 'knock-next' }, $ => answer($, () => nextMatch($)))
   on('command.run', { command: 'knock-block' }, ($, e) => answer($, () => block($, e.args)))
   on('command.run', { command: 'knock-room' }, ($, e) => answer($, () => room($, e.args)))
-  on('command.run', { command: 'knock-me' }, $ => answer($, () => whoami($)))
+  on('command.run', { command: 'knock-me' }, ($, e) => answer($, () => settings($, e.args)))
+
+  on('ui.render', { component: 'Pane', requestId: PICKER }, async ($, e) => {
+    const table = $.ui.resolve(e)
+    const { Box, Text } = table
+    // Every surface but mobile has a Select.
+    const Select = 'Select' in table ? table.Select : null
+    const me = picking?.me ?? (await $.state.get(ME)).value ?? '나'
+    const current = colorFor(me, picking?.picked)
+    const options = [
+      ...COLOR_KEYS.map(key => ({ value: key, label: COLORS[key].label })),
+      { value: 'auto', label: `자동 (${COLORS[colorFor(me)].label})` },
+    ]
+    return (
+      <Box flexDirection="column">
+        <Text dimColor>방에서 내 이름이 이렇게 보입니다. ↑↓로 고르고 Enter, Esc로 닫기</Text>
+        {COLOR_KEYS.map(key => (
+          <Text>
+            <Text color={COLORS[key].hex} weight="bold">
+              {me}
+            </Text>
+            {` 오늘 점심 뭐 먹지 · ${COLORS[key].label}${key === current ? ' (지금)' : ''}`}
+          </Text>
+        ))}
+        {Select ? (
+          <Select
+            key="color"
+            label="색"
+            autoFocus
+            options={options}
+            value={isColor(picking?.picked) ? picking.picked : 'auto'}
+            onSelect={(value: string) => void pick($, value)}
+          />
+        ) : (
+          <Text dimColor>{`고르기: /knock-me color <색> (${COLOR_LIST})`}</Text>
+        )}
+      </Box>
+    )
+  })
   // Its own output is fine as is: it ends the chat turn at once.
   on('command.run', { command: 'knock-off' }, $ => withServer($, () => leave($)))
 
@@ -762,7 +890,8 @@ export const register: Register = on => {
         for (const m of messages) {
           // The live view draws a streamed line once it ends.
           yield* typeOut($, `${lineOf(m)}\n`, next.budget.remainingMs > ANIMATE_MS)
-          said.push(m.text)
+          // What Claude reads later: in a room, who said each line.
+          said.push(m.group ? `${m.from}: ${m.text}` : m.text)
         }
       }
     } finally {

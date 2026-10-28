@@ -39,7 +39,7 @@ What you type goes to your friend, and their replies show up where Claude's answ
 | `/knock-next` | Leave this random match and find the next one |
 | `/knock-room [room]` | Join a group room, up to 8 people. Alone, it shows who's in your room |
 | `/knock-block [name]` | Block the person you're chatting with, or a name |
-| `/knock-me` | Your name and who you're chatting with |
+| `/knock-me` | Your name, color and chat, and your settings: `color` picks your name's color, `name <name>` switches names |
 | `/knock-off` | Leave the chat or room (or stop looking) and go back to Claude |
 
 ## Good to know
@@ -124,7 +124,8 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 | 12:02 | | `❯ ramen?` |
 | 12:02 | `⏺ bob ramen?` | |
 
-- Others' messages land where Claude's answers go, one per line, each led by its sender's name in bold.
+- Others' messages land where Claude's answers go, one per line, each led by its sender's name in bold and in their color.
+- `/knock-me color` opens a picker that shows your name in each of 8 colors; `/knock-me color blue` (or `파랑`) sets one directly. Until you pick, your name gets a color of its own.
 - You see who comes and goes. `/knock-room` alone shows who's in the room.
 - The server doesn't store messages, so you only see what's said after you join.
 - The room goes away when the last person leaves.

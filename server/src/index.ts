@@ -55,6 +55,13 @@ app.post('/room', perUser, async c => {
   return reply(c, await hub(c).join(token(c), str(window), str(room)))
 })
 
+app.get('/me', perUser, async c => reply(c, await hub(c).me(token(c))))
+
+app.post('/me', perUser, async c => {
+  const { color } = await body(c)
+  return reply(c, await hub(c).setColor(token(c), str(color)))
+})
+
 app.post('/block', perUser, async c => {
   const { window, name } = await body(c)
   return reply(c, await hub(c).block(token(c), str(window), str(name)))
