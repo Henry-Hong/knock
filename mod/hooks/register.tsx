@@ -890,8 +890,8 @@ async function picture($: $, args: string): Promise<string> {
   let png: string
   try {
     png = (await $.fs.read(path, { as: 'bytes' })).base64
-  } catch {
-    return t(`Could not read ${path}`, `파일을 읽지 못했습니다: ${path}`)
+  } catch (err) {
+    return unreadable(path, String(err))
   }
   if (!png.startsWith(PNG_HEAD)) return t('Only PNG pictures for now. A screenshot is one.', '지금은 PNG만 보낼 수 있습니다. 스크린샷은 PNG입니다.')
   if (png.length > PNG_MAX) return t('A picture is up to 4 MB.', '사진은 4 MB까지 보낼 수 있습니다.')
@@ -907,6 +907,24 @@ async function picture($: $, args: string): Promise<string> {
   const { width, height } = sizeOf(png)
   const name = path.split('/').pop() ?? path
   return t(`📷 Sent ${name} (${width}×${height}). See it: /knock pic`, `📷 ${name} (${width}×${height})을(를) 보냈습니다. 보기: /knock pic`)
+}
+
+// Why a picture's file could not be read, and what to do: macOS keeps Desktop, Documents and Downloads
+// from an app (the terminal running Claude Code) until it is allowed, and restarted.
+function unreadable(path: string, why: string) {
+  if (/EPERM|EACCES|not permitted|permission denied/i.test(why)) {
+    return say(
+      t(`macOS did not let this terminal read ${path}`, `macOS가 이 터미널의 파일 읽기를 막았습니다: ${path}`),
+      t(
+        'Allow it: System Settings › Privacy & Security › Files and Folders › your terminal app, then restart the terminal',
+        '허용하기: 시스템 설정 › 개인정보 보호 및 보안 › 파일 및 폴더 › 쓰는 터미널 앱, 그다음 터미널을 다시 시작',
+      ),
+      t('Or move the picture to a folder outside Desktop, Documents and Downloads', '또는 사진을 데스크탑·문서·다운로드 밖의 폴더로 옮겨서 보내기'),
+    )
+  }
+  if (/ENOENT|no such file|not found/i.test(why)) return t(`No such file: ${path}`, `파일이 없습니다: ${path}`)
+  if (/4 ?MiB|too large|over/i.test(why)) return t('A picture is up to 4 MB.', '사진은 4 MB까지 보낼 수 있습니다.')
+  return t(`Could not read ${path} (${why})`, `파일을 읽지 못했습니다: ${path} (${why})`)
 }
 
 async function openViewer($: $): Promise<string> {

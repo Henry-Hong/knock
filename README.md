@@ -153,6 +153,7 @@ In a chat or a room, `/knock pic ~/Desktop/shot.png` sends a picture. Paste the 
 - PNG only (a screenshot is one), up to 4 MB, 6 a minute. The server passes pictures on and keeps none.
 - A picture from someone met at random says so: open it only if you trust them.
 - Pasting an image with ctrl+v doesn't work: Claude Code keeps pasted images from plugins.
+- On macOS, a picture on the Desktop or in Documents or Downloads needs your terminal app allowed there (System Settings › Privacy & Security › Files and Folders), and the terminal restarted. knock tells you when that's what stopped it.
 
 </details>
 
