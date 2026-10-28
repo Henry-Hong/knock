@@ -25,7 +25,7 @@ export type KnockEvent =
 
 // The /knock menu pane: the step it shows, what it read when it opened (the name's color, who
 // knocked, recent friends and rooms), and a line to say after an action in it.
-export type MenuStep = 'home' | 'friend' | 'room' | 'random' | 'me' | 'name'
+export type MenuStep = 'lang' | 'name' | 'home' | 'friend' | 'room' | 'random' | 'lobby' | 'me'
 export type Menu = {
   step: MenuStep
   color: string | null

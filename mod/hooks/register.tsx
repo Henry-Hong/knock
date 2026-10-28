@@ -576,13 +576,14 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
   const { value: me } = await $.state.get(ME)
   const [mine, knocks] = me ? await Promise.all([api($, 'GET', '/me'), api($, 'GET', '/knocks')]) : [null, null]
   const recent = await recentOf($)
+  const isLangPicked = (await $.store.get('lang')) !== undefined
   await $.state.set(MENU, {
-    step: me ? step : 'name',
+    step: me ? step : isLangPicked ? 'name' : 'lang',
     color: mine?.status === 200 ? ((mine.data?.color as string | null) ?? null) : null,
     knocks: knocks?.status === 200 ? ((knocks.data?.from ?? []) as string[]) : [],
     ...recent,
   })
-  const opened = await $.ui.open({ id: MENU_PANE, title: 'knock', focus: true, closeOnEscape: true, holdToasts: true, rows: 15 })
+  const opened = await $.ui.open({ id: MENU_PANE, title: 'knock', focus: true, closeOnEscape: true, holdToasts: true, rows: 20 })
   if (opened.isPlaced) return ''
   return me ? overview($, me) : noNameText(await accountsOf($, await serverOf($)))
 }
@@ -598,18 +599,13 @@ async function act($: $, run: () => Promise<string>) {
   if (shown.text) notice($, shown.text)
 }
 
-async function chooseHome($: $, value: string) {
-  if (value === 'off') return act($, () => leave($))
-  if (value.startsWith('knock:')) return act($, () => knock($, value.slice('knock:'.length)))
-  if (value === 'friend' || value === 'room' || value === 'random' || value === 'me') return goto($, value)
-}
-
-async function pickLang($: $, value: string) {
+// A language picked in the menu: on the first run it leads on to the name, in the settings it stays.
+async function pickLang($: $, value: Lang) {
   const said = await setLang($, value)
-  await update($, MENU, menu => (menu ? { ...menu, note: menu.step === 'me' ? said : undefined } : null))
+  await update($, MENU, menu => (menu ? { ...menu, step: menu.step === 'lang' ? 'name' : menu.step, note: menu.step === 'me' ? said : undefined } : null))
 }
 
-async function pickColor($: $, value: string) {
+async function pickColor($: $, value: ColorKey | 'auto') {
   const shown = await withServer($, () => setColor($, value))
   await update($, MENU, menu => (menu ? { ...menu, color: isColor(value) ? value : null, note: shown.text } : null))
 }
@@ -1026,22 +1022,22 @@ export const register: Register = on => {
     return { suggestions: [...found.suggestions, ...(await completions($, (typed[1] ?? '').split(/\s+/)))] }
   })
 
+  // The menu: one choice per row, each with its key (1: …), the first one focused, as Claude Code's
+  // own questions read. A step that asks for text has the field focused and its choices below.
   on('ui.render', { component: 'Pane', requestId: MENU_PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table
-    // Every surface but mobile has these.
-    const Select = 'Select' in table ? table.Select : null
+    // Every surface but mobile has an Input.
     const Input = 'Input' in table ? table.Input : null
     const { value: menu } = await $.state.get(MENU)
     const { value: me } = await $.state.get(ME)
     const { value: chat } = await $.state.get(CHAT)
-    if (!menu || !Select || !Input) {
+    if (!menu || !Input) {
       return <Text dimColor>{t('/knock <friend> · /knock room <room> · /knock random · /knock me · /knock off', '/knock <친구> · /knock room <방> · /knock random · /knock me · /knock off')}</Text>
     }
-    const mine = me ? COLORS[colorFor(me, menu.color)] : null
     const header = me ? (
       <Text>
-        <Text color={mine?.hex} weight="bold">
+        <Text color={COLORS[colorFor(me, menu.color)].hex} weight="bold">
           {me}
         </Text>
         {` · ${statusOf(chat, me)}`}
@@ -1050,91 +1046,28 @@ export const register: Register = on => {
       <Text weight="bold">{t('🚪 Welcome to knock', '🚪 knock에 오신 것을 환영합니다')}</Text>
     )
     const note = menu.note ? <Text dimColor>{menu.note}</Text> : null
-    const back = <Button key="back" label={t('← Back', '← 처음으로')} onPress={() => void goto($, 'home')} />
-    // English or Korean: the words change as soon as one is picked.
-    const language = (
-      <Select
-        key="lang"
-        label="Language / 언어"
-        options={[
-          { value: 'en', label: 'English' },
-          { value: 'ko', label: '한국어' },
-        ]}
-        value={lang}
-        onSelect={(value: string) => void pickLang($, value)}
-      />
-    )
-    const pickRecent = (key: string, list: string[], run: (value: string) => Promise<string>) =>
+    const keysHint = <Text dimColor>{t('Press a key, or ↑↓ and Enter · Esc closes', '키를 누르거나 ↑↓ 후 Enter · Esc로 닫기')}</Text>
+    const fieldHint = <Text dimColor>{t('Type and press Enter · Tab moves to the rows below · Esc closes', '입력하고 Enter · Tab으로 아래 줄로 이동 · Esc로 닫기')}</Text>
+    const back = <Button key="back" plain dimColor label={t('← Back', '← 처음으로')} onPress={() => void goto($, 'home')} />
+    // Recent friends or rooms under a field, each pressed to use it.
+    const recentRows = (list: string[], run: (value: string) => Promise<string>) =>
       list.length > 0 ? (
-        <Select key={key} label={t('Recent', '최근')} options={list.map(one => ({ value: one, label: one }))} value={list[0]} onSelect={(value: string) => void act($, () => run(value))} />
+        <Box flexDirection="column">
+          <Text dimColor>{t('Recent', '최근')}</Text>
+          {list.map(one => (
+            <Button key={`recent-${one}`} plain label={one} onPress={() => void act($, () => run(one))} />
+          ))}
+        </Box>
       ) : null
 
-    if (menu.step === 'friend') {
-      const names = [...new Set([...menu.knocks, ...menu.friends])]
+    if (menu.step === 'lang') {
       return (
         <Box flexDirection="column">
           {header}
-          <Input key="friend" label={t("Friend's name", '친구 이름')} placeholder={t('e.g. bob', '예: bob')} submitLabel={t('Knock', '노크')} autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
-          {pickRecent('friends', names, value => knock($, value))}
-          <Text dimColor>{t('Knock on each other to connect.', '서로 노크하면 연결됩니다.')}</Text>
-          {back}
-        </Box>
-      )
-    }
-    if (menu.step === 'room') {
-      return (
-        <Box flexDirection="column">
-          {header}
-          <Input key="room" label={t('Room', '방 이름')} placeholder={t('e.g. lunch-7k2q', '예: 점심팟-7k2q')} submitLabel={t('Join', '들어가기')} autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
-          {pickRecent('rooms', menu.rooms, value => room($, value))}
-          <Text dimColor>
-            {t(
-              `Up to ${GROUP_MAX} people who type the same name. A name no one would guess keeps it to people you tell.`,
-              `같은 이름을 입력한 사람끼리 최대 ${GROUP_MAX}명. 남이 맞히기 어려운 이름이면 아는 사람끼리만 씁니다.`,
-            )}
-          </Text>
-          {back}
-        </Box>
-      )
-    }
-    if (menu.step === 'random') {
-      return (
-        <Box flexDirection="column">
-          {header}
-          <Input key="lobby" label={t('Lobby code', '대기실 코드')} placeholder={t('empty for the open lobby', '비워 두면 전체 대기실')} submitLabel={t('Find', '찾기')} autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
-          <Text dimColor>{t('With a code, you only meet people who typed the same one.', '코드를 넣으면 같은 코드를 입력한 사람끼리만 만납니다.')}</Text>
-          {back}
-        </Box>
-      )
-    }
-    if (menu.step === 'me' && me) {
-      const current = colorFor(me, menu.color)
-      return (
-        <Box flexDirection="column">
-          {header}
-          {note}
-          {COLOR_KEYS.map(key => (
-            <Text>
-              <Text color={COLORS[key].hex} weight="bold">
-                {me}
-              </Text>
-              {` ${t('lunch, anyone?', '오늘 점심 뭐 먹지')} · ${colorName(key)}${key === current ? t(' (now)', ' (지금)') : ''}`}
-            </Text>
-          ))}
-          <Select
-            key="color"
-            label={t("Name's color", '이름 색')}
-            autoFocus
-            options={[
-              ...COLOR_KEYS.map(key => ({ value: key, label: colorName(key) })),
-              { value: 'auto', label: `${t('auto', '자동')} (${colorName(colorFor(me))})` },
-            ]}
-            value={isColor(menu.color) ? menu.color : 'auto'}
-            onSelect={(value: string) => void pickColor($, value)}
-          />
-          {language}
-          <Button key="rename" label={t('Change name', '이름 바꾸기')} onPress={() => void goto($, 'name')} />
-          {back}
+          <Text>Choose a language · 언어를 고르세요</Text>
+          <Button key="en" plain hotkey="1" label="English" autoFocus onPress={() => void pickLang($, 'en')} />
+          <Button key="ko" plain hotkey="2" label="한국어" onPress={() => void pickLang($, 'ko')} />
+          <Text dimColor>Press 1 or 2 · 1이나 2를 누르세요</Text>
         </Box>
       )
     }
@@ -1142,7 +1075,6 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {header}
-          {me ? null : language}
           <Text>
             {me
               ? t('Type a new name. A name no one has used yet is registered for you.', '새 이름을 입력하세요. 처음 쓰는 이름이면 새로 등록됩니다.')
@@ -1151,26 +1083,117 @@ export const register: Register = on => {
           {menu.note ? <Text color="#d9534f">{menu.note}</Text> : <Text dimColor>{NAME_RULE()}</Text>}
           <Input key="name" label={t('Name', '이름')} placeholder={t('e.g. alice', '예: alice')} submitLabel={t('Save', '정하기')} autoFocus onSubmit={(value: string) => void submitName($, value)} />
           {me ? back : null}
+          {fieldHint}
+        </Box>
+      )
+    }
+    if (menu.step === 'friend') {
+      return (
+        <Box flexDirection="column">
+          {header}
+          <Text>{t("Who do you knock on? Knock on each other to connect.", '누구에게 노크할까요? 서로 노크하면 연결됩니다.')}</Text>
+          <Input key="friend" label={t("Friend's name", '친구 이름')} placeholder={t('e.g. bob', '예: bob')} submitLabel={t('Knock', '노크')} autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
+          {recentRows([...new Set([...menu.knocks, ...menu.friends])], value => knock($, value))}
+          {back}
+          {fieldHint}
+        </Box>
+      )
+    }
+    if (menu.step === 'room') {
+      return (
+        <Box flexDirection="column">
+          {header}
+          <Text>
+            {t(
+              `Up to ${GROUP_MAX} people who type the same name. A name no one would guess keeps it to people you tell.`,
+              `같은 이름을 입력한 사람끼리 최대 ${GROUP_MAX}명. 남이 맞히기 어려운 이름이면 아는 사람끼리만 씁니다.`,
+            )}
+          </Text>
+          <Input key="room" label={t('Room', '방 이름')} placeholder={t('e.g. lunch-7k2q', '예: 점심팟-7k2q')} submitLabel={t('Join', '들어가기')} autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
+          {recentRows(menu.rooms, value => room($, value))}
+          {back}
+          {fieldHint}
+        </Box>
+      )
+    }
+    if (menu.step === 'random') {
+      return (
+        <Box flexDirection="column">
+          {header}
+          <Text>{t('Meet someone at random. Where do you wait?', '랜덤으로 아무나 만나요. 어디서 기다릴까요?')}</Text>
+          <Button key="open" plain hotkey="1" autoFocus label={t('The open lobby: anyone using knock', '전체 대기실: knock을 쓰는 누구나')} onPress={() => void act($, () => random($, ''))} />
+          <Button key="code" plain hotkey="2" label={t('A lobby with a code: only people who type the same code…', '코드가 있는 대기실: 같은 코드를 입력한 사람끼리만…')} onPress={() => void goto($, 'lobby')} />
+          {back}
+          {keysHint}
+        </Box>
+      )
+    }
+    if (menu.step === 'lobby') {
+      return (
+        <Box flexDirection="column">
+          {header}
+          <Input key="lobby" label={t('Lobby code', '대기실 코드')} placeholder={t('e.g. our-team', '예: 우리팀')} submitLabel={t('Find', '찾기')} autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
+          {back}
+          {fieldHint}
+        </Box>
+      )
+    }
+    if (menu.step === 'me') {
+      const current = isColor(menu.color) ? menu.color : null
+      const sample = t('lunch, anyone?', '오늘 점심 뭐 먹지')
+      return (
+        <Box flexDirection="column">
+          {header}
+          {note}
+          <Text weight="bold">{t("Your name's color", '이름 색')}</Text>
+          {COLOR_KEYS.map((key, i) => (
+            <Button key={`color-${key}`} plain hotkey={String(i + 1)} autoFocus={key === (current ?? colorFor(me)) ? true : undefined} onPress={() => void pickColor($, key)}>
+              <Text color={COLORS[key].hex} weight="bold">
+                {me}
+              </Text>
+              {` ${sample} · ${colorName(key)}${key === current ? ' ✓' : ''}`}
+            </Button>
+          ))}
+          <Button key="color-auto" plain hotkey="9" onPress={() => void pickColor($, 'auto')}>
+            {`${t('auto, by your name', '자동, 이름에 따라')} (${colorName(colorFor(me))})${current ? '' : ' ✓'}`}
+          </Button>
+          <Text weight="bold">Language · 언어</Text>
+          <Button key="lang-en" plain hotkey="e" label={`English${lang === 'en' ? ' ✓' : ''}`} onPress={() => void pickLang($, 'en')} />
+          <Button key="lang-ko" plain hotkey="k" label={`한국어${lang === 'ko' ? ' ✓' : ''}`} onPress={() => void pickLang($, 'ko')} />
+          <Button key="rename" plain hotkey="n" label={t('Change name', '이름 바꾸기')} onPress={() => void goto($, 'name')} />
+          {back}
+          {keysHint}
         </Box>
       )
     }
 
-    const options = [
-      ...menu.knocks.slice(0, 3).map(name => ({ value: `knock:${name}`, label: `🚪 ${t(`Connect with ${name} (knocked)`, `${name} 님과 연결하기 (노크 받음)`)}` })),
-      { value: 'friend', label: t('Knock on a friend', '친구에게 노크') },
-      { value: 'random', label: t('Meet someone at random', '아무나 만나기') },
-      { value: 'room', label: t('Join a room', '방 들어가기') },
-      { value: 'me', label: t('Settings (name, color, language)', '내 설정 (이름·색·언어)') },
+    const rows: { key: string; label: string; run: () => void }[] = [
+      ...menu.knocks.slice(0, 3).map(name => ({
+        key: `knocked-${name}`,
+        label: `🚪 ${t(`Connect with ${name} (knocked on you)`, `${name} 님과 연결하기 (나에게 노크함)`)}`,
+        run: () => void act($, () => knock($, name)),
+      })),
+      { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
+      { key: 'random', label: t('Meet someone at random', '아무나 만나기'), run: () => void goto($, 'random') },
+      { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
+      { key: 'me', label: t('Settings: name, color, language', '내 설정: 이름, 색, 언어'), run: () => void goto($, 'me') },
       ...(chat
-        ? [{ value: 'off', label: chat.group ? t('Leave the room', '방에서 나가기') : chat.isConnected ? t('End the chat', '대화 끝내기') : t('Stop waiting', '기다리기 그만두기') }]
+        ? [{
+            key: 'off',
+            label: chat.group ? t('Leave the room', '방에서 나가기') : chat.isConnected ? t('End the chat', '대화 끝내기') : t('Stop waiting', '기다리기 그만두기'),
+            run: () => void act($, () => leave($)),
+          }]
         : []),
     ]
     return (
       <Box flexDirection="column">
         {header}
         {note}
-        <Select key="home" label={t('What next', '무엇을 할까요')} autoFocus options={options} value={options[0]?.value} onSelect={(value: string) => void chooseHome($, value)} />
-        <Text dimColor>{t('↑↓ then Enter · Esc closes · Or type: /knock bob, /knock room lunch', '↑↓로 고르고 Enter · Esc로 닫기 · 바로 쓰기: /knock bob, /knock room 점심팟')}</Text>
+        {rows.map((row, i) => (
+          <Button key={row.key} plain hotkey={String(i + 1)} autoFocus={i === 0 ? true : undefined} label={row.label} onPress={row.run} />
+        ))}
+        {keysHint}
+        <Text dimColor>{t('Or type it: /knock bob, /knock room lunch, /knock off', '바로 쓰기: /knock bob, /knock room 점심팟, /knock off')}</Text>
       </Box>
     )
   })
