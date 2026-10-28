@@ -45,6 +45,16 @@ app.post('/knock', perUser, async c => {
 
 app.get('/knocks', perUser, async c => reply(c, await hub(c).knocks(token(c))))
 
+app.post('/random', perUser, async c => {
+  const { window, room } = await body(c)
+  return reply(c, await hub(c).random(token(c), str(window), str(room)))
+})
+
+app.post('/block', perUser, async c => {
+  const { window, name } = await body(c)
+  return reply(c, await hub(c).block(token(c), str(window), str(name)))
+})
+
 app.post('/send', perUser, async c => {
   const { window, text } = await body(c)
   return reply(c, await hub(c).send(token(c), str(window), str(text)))
