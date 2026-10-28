@@ -592,7 +592,6 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
 // is picked, nor from home: there Esc closes the menu.
 function parentOf(step: MenuStep, hasName: boolean): MenuStep | null {
   if (!hasName || step === 'home') return null
-  if (step === 'lobby') return 'random'
   if (step === 'name' || step === 'color' || step === 'lang') return 'me'
   return 'home'
 }
@@ -794,6 +793,7 @@ async function seek($: $, room: string): Promise<string> {
   return say(
     `🎲 ${t(`Looking in ${lobbyOf(room)}.`, `${lobbyOf(room)}에서 상대를 찾는 중입니다.`)}`,
     t('You connect as soon as someone comes', '누군가 들어오면 바로 연결됩니다'),
+    !room && t('Only among people with a code: /knock random <code>', '코드를 아는 사람끼리만: /knock random <코드>'),
     t('Stop: /knock off', '그만 찾기: /knock off'),
   )
 }
@@ -1162,23 +1162,6 @@ export const register: Register = on => {
       )
       return list([...recentRows(menu.rooms, value => room($, value)), back(false)], field, fieldHint)
     }
-    if (menu.step === 'lobby') {
-      const field = (
-        <Input key="lobby" label={t('Lobby code', '대기실 코드')} placeholder={t('e.g. our-team', '예: 우리팀')} submitLabel={t('Find', '찾기')} autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
-      )
-      return list([back(false)], field, fieldHint)
-    }
-    if (menu.step === 'random') {
-      return list(
-        [
-          { key: 'open', hotkey: '1', label: t('The open lobby: anyone on knock', '전체 대기실: knock을 쓰는 누구나'), run: () => void act($, () => random($, '')) },
-          { key: 'code', hotkey: '2', label: t('A lobby with a code: only those who type it…', '코드가 있는 대기실: 같은 코드끼리만…'), run: () => void goto($, 'lobby') },
-          back(true),
-        ],
-        null,
-        keysHint,
-      )
-    }
     if (menu.step === 'me') {
       const color = colorFor(me, menu.color)
       return list(
@@ -1240,7 +1223,7 @@ export const register: Register = on => {
             ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you…`, `${namesOf(knocked)} 님이 노크함…`)}`, run: () => void goto($, 'friend') }]
             : []),
         { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
-        { key: 'random', label: t('Meet someone at random', '아무나 만나기'), run: () => void goto($, 'random') },
+        { key: 'random', label: t('Meet someone at random', '아무나 만나기'), run: () => void act($, () => random($, '')) },
         { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
         { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), run: () => void goto($, 'me') },
         ...(chat

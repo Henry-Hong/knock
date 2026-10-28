@@ -15,6 +15,8 @@ const NAME = /^[a-z0-9][a-z0-9_-]{1,19}$/
 // are named the same way, without the empty one.
 const ROOM = /^[^\s\p{Cc}]{0,32}$/u
 const GROUP_MAX = 8
+// How long /knock next keeps the one moved on from out of the mover's random matches, both ways.
+const SKIP_MS = 60_000
 // The colors a name can be drawn in; the client picks the shades.
 const COLORS = ['red', 'orange', 'yellow', 'green', 'sky', 'blue', 'purple', 'pink']
 
@@ -41,8 +43,8 @@ type Live = {
   seekingAt: number
   peer: string | null
   isRandom: boolean
-  // Who the last random match was with; the next one skips them, so /knock-next moves on.
-  lastPeer: string | null
+  // Who this user moved on from with /knock next, and until when the two are not matched again.
+  skip: { name: string; until: number } | null
   // The group room this user is in, instead of a peer.
   group: string | null
   queue: KnockEvent[]
@@ -130,14 +132,17 @@ export class Hub extends DurableObject<Env> {
     this.sweep()
 
     const live = this.claim(me, window)
+    // Seeking from a random chat is /knock next: moving on from that peer for a while.
+    if (live.peer && live.isRandom) live.skip = { name: live.peer, until: Date.now() + SKIP_MS }
     if (live.peer) this.part(me, 'left')
     this.depart(me, 'left')
     live.target = null
     const blocked = this.blocked(me)
+    const isSkipped = (l: Live, name: string) => l.skip?.name === name && Date.now() < l.skip.until
     const [match] = [...this.live]
       .filter(
         ([name, l]) =>
-          name !== me && l.seeking === room && !l.peer && !blocked.has(name) && name !== live.lastPeer && l.lastPeer !== me,
+          name !== me && l.seeking === room && !l.peer && !blocked.has(name) && !isSkipped(live, name) && !isSkipped(l, me),
       )
       .sort(([, a], [, b]) => a.seekingAt - b.seekingAt)
     if (match) {
@@ -324,7 +329,7 @@ export class Hub extends DurableObject<Env> {
       seekingAt: 0,
       peer: null,
       isRandom: false,
-      lastPeer: null,
+      skip: null,
       group: null,
       queue: [],
       waiter: null,
@@ -353,13 +358,11 @@ export class Hub extends DurableObject<Env> {
     if (!live?.peer) return
     const peer = this.live.get(live.peer)
     if (peer) {
-      if (peer.isRandom) peer.lastPeer = name
       peer.peer = null
       peer.target = null
       peer.isRandom = false
       this.push(live.peer, { type: 'left', peer: name, reason })
     }
-    if (live.isRandom) live.lastPeer = live.peer
     live.peer = null
     live.target = null
     live.isRandom = false
