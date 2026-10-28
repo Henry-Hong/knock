@@ -57,7 +57,10 @@ async function api($: $, method: 'GET' | 'POST', path: string, body?: object): P
 const poll = async ($: $, holdMs: number) =>
   api($, 'GET', `/poll?window=${encodeURIComponent(await $.session.id())}&hold=${holdMs}`)
 
-const errorOf = (r: Reply) => String(r.data?.error ?? `HTTP ${r.status}`)
+const errorOf = (r: Reply) =>
+  r.status === 429 ? '요청이 너무 많아요. 잠깐 뒤에 다시 해 주세요' : String(r.data?.error ?? `HTTP ${r.status}`)
+// Worth trying again: the server is down for a moment, or we went over its rate limit.
+const isPassing = (r: Reply) => r.status >= 500 || r.status === 429
 const eventsOf = (r: Reply) => (r.data?.events ?? []) as KnockEvent[]
 
 // A line for `claude --debug-file` alone, led by the plugin's name.
@@ -149,7 +152,7 @@ async function pollOnce($: $, id: number) {
   } catch {}
   if (r?.status === 200) await take($, eventsOf(r))
   if (id !== loop) return
-  if (!r || r.status >= 500) {
+  if (!r || isPassing(r)) {
     $.clock.after(3000, () => void pollOnce($, id))
     return
   }
@@ -194,7 +197,8 @@ async function waitForReply($: $, signal: AbortSignal, listenMs: number): Promis
         void polled.then(late => (late?.status === 200 ? take($, eventsOf(late)) : undefined))
         break
       }
-      if (!r) break
+      // The background loop rides out a hiccup with a pause this turn's budget can't afford.
+      if (!r || isPassing(r)) break
       if (r.status !== 200) {
         await endChat($)
         notice($, `knock: 연결이 끊겼어요 (${errorOf(r)})`)

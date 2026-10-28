@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono'
+import { createMiddleware } from 'hono/factory'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 
 import type { Result } from './hub'
@@ -16,26 +17,40 @@ const str = (v: unknown) => (typeof v === 'string' ? v : '')
 const reply = <T>(c: Context<App>, r: Result<T>) =>
   r.ok ? c.json(r.data as object) : c.json({ error: r.error }, r.status as ContentfulStatusCode)
 
+// Floods stop here, before they reach the Hub.
+const ip = (c: Context<App>) => c.req.header('cf-connecting-ip') ?? 'local'
+const tooMany = (c: Context<App>) => c.json({ error: 'too many requests, slow down' }, 429)
+const limitBy = (limiter: (c: Context<App>) => RateLimit, key: (c: Context<App>) => string) =>
+  createMiddleware<App>(async (c, next) => {
+    if (!(await limiter(c).limit({ key: key(c) })).success) return tooMany(c)
+    await next()
+  })
+const perIp = limitBy(c => c.env.IP_LIMIT, ip)
+const perSignup = limitBy(c => c.env.REGISTER_LIMIT, ip)
+const perUser = limitBy(c => c.env.USER_LIMIT, token)
+
+app.use('*', perIp)
+
 app.get('/', c => c.text('knock relay'))
 
-app.post('/register', async c => {
+app.post('/register', perSignup, async c => {
   const { name } = await body(c)
   return reply(c, await hub(c).register(str(name)))
 })
 
-app.post('/knock', async c => {
+app.post('/knock', perUser, async c => {
   const { window, to } = await body(c)
   return reply(c, await hub(c).knock(token(c), str(window), str(to)))
 })
 
-app.get('/knocks', async c => reply(c, await hub(c).knocks(token(c))))
+app.get('/knocks', perUser, async c => reply(c, await hub(c).knocks(token(c))))
 
-app.post('/send', async c => {
+app.post('/send', perUser, async c => {
   const { window, text } = await body(c)
   return reply(c, await hub(c).send(token(c), str(window), str(text)))
 })
 
-app.post('/leave', async c => {
+app.post('/leave', perUser, async c => {
   const { window } = await body(c)
   return reply(c, await hub(c).leave(token(c), str(window)))
 })

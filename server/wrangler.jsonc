@@ -7,5 +7,12 @@
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  // Per minute. IP_LIMIT covers every request and leaves room for an office behind one IP;
+  // USER_LIMIT is what one person does (sends, knocks); a poll paces itself and is left to IP_LIMIT.
+  "ratelimits": [
+    { "name": "IP_LIMIT", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } },
+    { "name": "REGISTER_LIMIT", "namespace_id": "1002", "simple": { "limit": 5, "period": 60 } },
+    { "name": "USER_LIMIT", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } }
+  ]
 }

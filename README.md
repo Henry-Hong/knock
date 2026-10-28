@@ -14,23 +14,20 @@ Claude Code 세션 안에서 친구랑 채팅하는 플러그인이에요.
 
 ## 설치
 
-터미널의 Claude Code 프롬프트에서:
+터미널의 Claude Code 프롬프트에서 한 줄이면 돼요:
 
 ```
 /plugin install knock --marketplace Henry-Hong/knock
-/plugin install knock-view --marketplace Henry-Hong/knock
 ```
 
 셸에서:
 
 ```sh
 claude plugin install knock --marketplace Henry-Hong/knock
-claude plugin install knock-view --marketplace Henry-Hong/knock
 ```
 
-- 처음엔 `Add marketplace?`가 떠요. `y`를 누르고 범위(user)를 고르면 돼요.
-- 이 레포는 private이에요. 레포에 초대받은 GitHub 계정이 있어야 하고, 그 컴퓨터에 GitHub 인증이 돼 있어야 해요. `gh auth login` 다음에 `gh auth setup-git`을 하거나 SSH 키를 쓰면 돼요. 설치할 때 인증을 따로 묻지 않아요.
-- `knock-view`는 메시지가 왔을 때 knock이 턴을 열려고 넣는 `📨` 줄을 가려요. 없어도 동작은 하지만 같이 까는 걸 추천해요.
+- 처음엔 `Add marketplace?`가 떠요. `y`를 누르고 범위(user)를 고르면 바로 켜져요.
+- 같이 깔리는 `knock-view`는 메시지가 왔을 때 knock이 턴을 열려고 넣는 `📨` 줄을 가려요.
 
 Claude Code 2.1.311에서 만들고 테스트했어요.
 
@@ -58,7 +55,7 @@ Claude Code 2.1.311에서 만들고 테스트했어요.
 - **끝낼 땐 `/knock-off`**: Esc를 누르면 Claude Code가 `Interrupted`를 띄워요.
 - **이름**: 이름은 컴퓨터에 저장돼요. 이름이 하나뿐이면 새 창에서도 자동으로 그 이름을 써요. 여러 개면(테스트용 이름 등) 창마다 `/knock-init <이름>`으로 골라야 해요.
 - **한 이름은 한 창**: 같은 이름으로 다른 창에서 `/knock` 하면 연결이 그 창으로 넘어가요.
-- **Claude가 헷갈리지 않게**: 채팅이 끝나고 Claude한테 다시 말을 걸면, 아까 `⏺`로 뜬 건 친구가 쓴 거라고 Claude한테 알려 줘요.
+- **채팅은 그 세션 기록에 남아요**: 채팅이 끝나고 같은 창에서 Claude한테 다시 말을 걸면, 그 채팅도 대화 기록에 포함돼 Claude한테 같이 가요. 그만큼 토큰도 들어요. knock이 "아까 `⏺`로 뜬 건 친구가 쓴 거야"라고 Claude한테 알려 줘서 헷갈리지는 않아요. 그래도 중요한 작업을 하던 창보다는 새 창에서 채팅하는 걸 추천해요.
 
 ## 서버
 
@@ -72,6 +69,12 @@ KNOCK_SERVER=https://my-knock.example.workers.dev claude
 - 계정(이름과 토큰 해시)은 SQLite에 저장해요.
 - 누가 노크했고 누가 연결됐는지는 메모리에만 들고 있어요.
 - 메시지는 롱 폴링으로 전달하고 저장하지 않아요.
+- 남용을 막으려고 1분 단위로 횟수를 제한해요.
+  - 가입: IP당 5번
+  - 노크·전송 등: 사람당 60번
+  - 전체 요청: IP당 300번
+
+  넘으면 잠깐 뒤에 다시 하라고 안내해요.
 
 ### 직접 띄우기
 
