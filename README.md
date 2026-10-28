@@ -42,7 +42,8 @@ Already know your way? `/knock bob` knocks on bob at once, and `/knock off` leav
 | `/knock room [room]` | Join a group room, up to 8 people. Alone, it shows who's in your room |
 | `/knock block [name]` | Block the person you're chatting with, or a name |
 | `/knock me` | Your settings: your name's color (with a preview), your name, and the language. `/knock me color blue`, `/knock me name <name>` and `/knock me lang ko` do it directly |
-| `/knock pic <file.png>` | Send a PNG picture to the chat or room. `/knock pic` alone shows the pictures you got |
+| `/knock pic paste` | Send the picture you copied (macOS) to the chat or room |
+| `/knock pic <file.png>` | Send a PNG file instead. `/knock pic` alone shows the pictures you got |
 | `/knock off` | Leave the chat or room (or stop looking) and go back to Claude |
 
 The older `/knock-room`-style commands still work, out of the typeahead.
@@ -142,7 +143,7 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 <details>
 <summary><b>Pictures</b></summary>
 
-In a chat or a room, `/knock pic ~/Desktop/shot.png` sends a picture. Paste the path, or drag the file in; quotes and spaces are fine.
+In a chat or a room, copy a picture and type `/knock pic paste`. ⌘⌃⇧4 captures a part of the screen straight to the clipboard; a picture copied in a browser, Finder or Preview works too, JPEG included. Or send a PNG file: `/knock pic ~/shots/shot.png` (paste the path or drag the file in; quotes and spaces are fine).
 
 ```
 ⏺ bob 📷 sent a picture · see it: /knock pic
@@ -150,9 +151,10 @@ In a chat or a room, `/knock pic ~/Desktop/shot.png` sends a picture. Paste the 
 
 - `/knock pic` opens a viewer with the latest pictures, newest first: `o` older, `n` newer, `Esc` closes.
 - The viewer draws the picture in colored blocks, which works in any terminal. Press `g` for the sharp picture where the terminal can draw one (iTerm2, Ghostty, kitty; up to 2 MB).
-- PNG only (a screenshot is one), up to 4 MB, 6 a minute. The server passes pictures on and keeps none.
+- A file must be a PNG (a screenshot is one), up to 4 MB; a pasted picture is turned into a PNG and shrunk to fit. 6 a minute. The server passes pictures on and keeps none.
+- `/knock` lists **Send the picture you copied** while you're in a chat, and **See the pictures** once you have some.
 - A picture from someone met at random says so: open it only if you trust them.
-- Pasting an image with ctrl+v doesn't work: Claude Code keeps pasted images from plugins.
+- Pasting into the prompt with ctrl+v doesn't send it: Claude Code keeps pasted images from plugins. Copy, then `/knock pic paste`.
 - On macOS, a picture on the Desktop or in Documents or Downloads needs your terminal app allowed there (System Settings › Privacy & Security › Files and Folders), and the terminal restarted. knock tells you when that's what stopped it.
 
 </details>

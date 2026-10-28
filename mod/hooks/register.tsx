@@ -520,7 +520,8 @@ const SUBCOMMANDS = {
   block: () => t('Block someone · /knock block [name]', '차단하기 · /knock block [이름]'),
   me: () => t('Your name, color and language', '내 이름, 색, 언어'),
   off: () => t('End the chat', '대화 끝내기'),
-  pic: () => t('Send a PNG picture · /knock pic <path>; alone, see the pictures', 'PNG 사진 보내기 · /knock pic <경로>, 그냥 입력하면 받은 사진 보기'),
+  pic: () =>
+    t('Pictures: /knock pic paste sends the copied one, /knock pic <file.png> a file; alone, see them', '사진: /knock pic paste 복사한 사진 보내기, /knock pic <파일.png> 파일 보내기, 그냥 입력하면 받은 사진 보기'),
 } as const
 const isSubcommand = (word: string): word is keyof typeof SUBCOMMANDS => Object.hasOwn(SUBCOMMANDS, word)
 
@@ -881,11 +882,13 @@ async function pathOf($: $, typed: string) {
   return path
 }
 
-// `/knock pic <path>`: sends a PNG to the chat or room; `/knock pic` alone shows the pictures.
+// `/knock pic paste` sends the picture copied to the clipboard, `/knock pic <path>` a PNG file, both to
+// the chat or room; `/knock pic` alone shows the pictures.
 async function picture($: $, args: string): Promise<string> {
   if (!args.trim()) return openViewer($)
   const { value: chat } = await $.state.get(CHAT)
   if (!chat?.isConnected) return t('Pictures go to a chat or a room: connect first.', '사진은 채팅이나 방으로 보냅니다. 먼저 연결해 주세요.')
+  if (args.trim().toLowerCase() === 'paste') return pastePicture($)
   const path = await pathOf($, args)
   let png: string
   try {
@@ -893,6 +896,10 @@ async function picture($: $, args: string): Promise<string> {
   } catch (err) {
     return unreadable(path, String(err))
   }
+  return sendPng($, png, path.split('/').pop() ?? path)
+}
+
+async function sendPng($: $, png: string, name: string): Promise<string> {
   if (!png.startsWith(PNG_HEAD)) return t('Only PNG pictures for now. A screenshot is one.', '지금은 PNG만 보낼 수 있습니다. 스크린샷은 PNG입니다.')
   if (png.length > PNG_MAX) return t('A picture is up to 4 MB.', '사진은 4 MB까지 보낼 수 있습니다.')
   const r = await api($, 'POST', '/pic', { window: await $.session.id(), png })
@@ -905,8 +912,64 @@ async function picture($: $, args: string): Promise<string> {
   const { value: me } = await $.state.get(ME)
   await keepPicture($, { from: me ?? 'me', png, at: Date.now(), isStranger: false })
   const { width, height } = sizeOf(png)
-  const name = path.split('/').pop() ?? path
   return t(`📷 Sent ${name} (${width}×${height}). See it: /knock pic`, `📷 ${name} (${width}×${height})을(를) 보냈습니다. 보기: /knock pic`)
+}
+
+// AppleScript that writes the clipboard's picture to `<out>.png` (`.tiff` when that is all it holds)
+// and says which, or "none". Its variable is `fmt`: `kind` is a word of AppleScript's own.
+const CLIPBOARD_SCRIPT = [
+  'on run argv',
+  'set out to item 1 of argv',
+  'try',
+  'set img to (the clipboard as «class PNGf»)',
+  'set fmt to "png"',
+  'on error',
+  'try',
+  'set img to (the clipboard as «class TIFF»)',
+  'set fmt to "tiff"',
+  'on error',
+  'return "none"',
+  'end try',
+  'end try',
+  'set f to open for access POSIX file (out & "." & fmt) with write permission',
+  'set eof f to 0',
+  'write img to f',
+  'close access f',
+  'return fmt',
+  'end run',
+]
+
+// `/knock pic paste`: the clipboard's picture, through a file in the temp folder, which macOS does not
+// guard as it does Desktop, Documents and Downloads. One too big for a read is shrunk to fit.
+async function pastePicture($: $): Promise<string> {
+  const out = `${((await $.env.get('TMPDIR')) ?? '/tmp/').replace(/\/?$/, '/')}knock-paste-${Date.now()}`
+  const files = [`${out}.png`, `${out}.tiff`]
+  try {
+    let fmt: string
+    try {
+      const r = await $.process.run(['osascript', ...CLIPBOARD_SCRIPT.flatMap(line => ['-e', line]), out], { timeoutMs: 15_000 })
+      fmt = r.stdout.trim()
+      if (r.exitCode !== 0) return t(`Could not read the clipboard (${r.stderr.trim()})`, `클립보드를 읽지 못했습니다 (${r.stderr.trim()})`)
+    } catch {
+      return t('Pasting a picture works on macOS. Send a file instead: /knock pic <path to a PNG>', '사진 붙여 넣기는 macOS에서 됩니다. 파일로 보내기: /knock pic <PNG 경로>')
+    }
+    if (fmt !== 'png' && fmt !== 'tiff') {
+      return t('No picture in the clipboard. Copy one first (⌘⌃⇧4 captures straight to it).', '클립보드에 사진이 없습니다. 먼저 복사해 주세요 (⌘⌃⇧4로 캡처하면 바로 들어갑니다).')
+    }
+    if (fmt === 'tiff') await $.process.run(['sips', '-s', 'format', 'png', `${out}.tiff`, '--out', `${out}.png`])
+    // Shrink a picture over what one read takes, its long side to 1920 pixels, then 1280.
+    for (const side of ['1920', '1280']) {
+      const size = Number((await $.process.run(['stat', '-f', '%z', `${out}.png`])).stdout.trim())
+      if (size <= 4 * 1024 * 1024) break
+      await $.process.run(['sips', '-Z', side, `${out}.png`])
+    }
+    const png = (await $.fs.read(`${out}.png`, { as: 'bytes' })).base64
+    return sendPng($, png, t('the copied picture', '복사한 사진'))
+  } catch (err) {
+    return t(`Could not send the copied picture (${String(err)})`, `복사한 사진을 보내지 못했습니다 (${String(err)})`)
+  } finally {
+    void $.process.run(['rm', '-f', ...files]).catch(() => undefined)
+  }
 }
 
 // Why a picture's file could not be read, and what to do: macOS keeps Desktop, Documents and Downloads
@@ -1055,6 +1118,7 @@ async function completions($: $, words: string[]): Promise<PromptAutocompleteSug
       ...starting(recent.friends).map(name => ({ text: name, description: t('recent friend · knock', '최근 친구 · 노크') })),
     ]
   }
+  if (words.length === 2 && first === 'pic') return starting(['paste']).map(word => ({ text: word, description: t('send the picture you copied', '복사한 사진 보내기') }))
   if (words.length === 2 && first === 'room') return starting(recent.rooms).map(room => ({ text: room, description: t('recent room', '최근 방') }))
   if (words.length === 2 && first === 'block') {
     const { value: chat } = await $.state.get(CHAT)
@@ -1625,6 +1689,12 @@ export const register: Register = on => {
         { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
         { key: 'random', label: t('Meet someone at random', '아무나 만나기'), run: () => void act($, () => random($, '')) },
         { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
+        ...(chat?.isConnected
+          ? [{ key: 'paste', label: t('Send the picture you copied', '복사한 사진 보내기'), run: () => void act($, () => pastePicture($)) }]
+          : []),
+        ...(pictures.length
+          ? [{ key: 'pictures', label: t(`See the pictures (${pictures.length})`, `받은 사진 보기 (${pictures.length})`), run: () => void act($, () => openViewer($)) }]
+          : []),
         { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), run: () => void goto($, 'me') },
         ...(chat
           ? [{
