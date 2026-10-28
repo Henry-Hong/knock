@@ -1024,10 +1024,11 @@ export const register: Register = on => {
   })
 
   // The menu: choices with their keys (1: …), the first one focused, as Claude Code's own questions
-  // read. Each step stays within six rows: the pane may get no more, and one that overflows scrolls
-  // under the arrows instead of moving between choices. A step that asks for text has the field
-  // focused and its choices under it.
+  // read. A step that asks for text has the field focused and its choices under it. Each step fits
+  // the rows the pane got (`space`): a body that overflows scrolls under the arrows instead of moving
+  // between choices. Short of rows, the hints go first, then the home's choices share one row.
   on('ui.render', { component: 'Pane', requestId: MENU_PANE }, async ($, e) => {
+    const space = e.props.scroll.bodyRows
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table
     // Every surface but mobile has an Input.
@@ -1069,14 +1070,14 @@ export const register: Register = on => {
           <Text>Choose a language · 언어를 고르세요</Text>
           <Button key="en" plain hotkey="1" label="English" autoFocus onPress={() => void pickLang($, 'en')} />
           <Button key="ko" plain hotkey="2" label="한국어" onPress={() => void pickLang($, 'ko')} />
-          <Text dimColor>Press 1 or 2 · 1이나 2를 누르세요</Text>
+          {space >= 5 && <Text dimColor>Press 1 or 2 · 1이나 2를 누르세요</Text>}
         </Box>
       )
     }
     if (menu.step === 'name' || !me) {
       return (
         <Box flexDirection="column">
-          {header}
+          {space >= 4 && header}
           <Text>
             {me ? t('Your new name:', '새 이름:') : t('First, pick the name friends knock on you by:', '먼저 친구가 노크할 내 이름을 정하세요:')}
             <Text dimColor>{t(' 2-20 of a-z 0-9 _ -', ' 영문 소문자·숫자·_·- 2~20자')}</Text>
@@ -1084,48 +1085,48 @@ export const register: Register = on => {
           {menu.note && <Text color="#d9534f">{menu.note}</Text>}
           <Input key="name" label={t('Name', '이름')} placeholder={t('e.g. alice', '예: alice')} submitLabel={t('Save', '정하기')} autoFocus onSubmit={(value: string) => void submitName($, value)} />
           {me ? back : null}
-          {fieldHint}
+          {space >= (menu.note ? 5 : 4) + (me ? 1 : 0) && fieldHint}
         </Box>
       )
     }
     if (menu.step === 'friend') {
       return (
         <Box flexDirection="column">
-          {header}
+          {space >= 3 && header}
           <Input key="friend" label={t("Friend's name", '친구 이름')} placeholder={t('e.g. bob', '예: bob')} submitLabel={t('Knock', '노크')} autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
           {below([...new Set([...menu.knocks, ...menu.friends])], value => knock($, value))}
-          <Text dimColor>{t('Knock on each other to connect · Esc closes', '서로 노크하면 연결됩니다 · Esc로 닫기')}</Text>
+          {space >= 4 && <Text dimColor>{t('Knock on each other to connect · Esc closes', '서로 노크하면 연결됩니다 · Esc로 닫기')}</Text>}
         </Box>
       )
     }
     if (menu.step === 'room') {
       return (
         <Box flexDirection="column">
-          {header}
+          {space >= 3 && header}
           <Input key="room" label={t('Room', '방 이름')} placeholder={t('e.g. lunch-7k2q', '예: 점심팟-7k2q')} submitLabel={t('Join', '들어가기')} autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
           {below(menu.rooms, value => room($, value))}
-          <Text dimColor>{t(`Up to ${GROUP_MAX} who type the same name; pick one no one would guess`, `같은 이름을 입력한 최대 ${GROUP_MAX}명 · 남이 맞히기 어려운 이름으로`)}</Text>
+          {space >= 4 && <Text dimColor>{t(`Up to ${GROUP_MAX} who type the same name; pick one no one would guess`, `같은 이름을 입력한 최대 ${GROUP_MAX}명 · 남이 맞히기 어려운 이름으로`)}</Text>}
         </Box>
       )
     }
     if (menu.step === 'random') {
       return (
         <Box flexDirection="column">
-          {header}
+          {space >= 4 && header}
           <Button key="open" plain hotkey="1" autoFocus label={t('The open lobby: anyone on knock', '전체 대기실: knock을 쓰는 누구나')} onPress={() => void act($, () => random($, ''))} />
           <Button key="code" plain hotkey="2" label={t('A lobby with a code: only those who type it…', '코드가 있는 대기실: 같은 코드끼리만…')} onPress={() => void goto($, 'lobby')} />
           {back}
-          {keysHint}
+          {space >= 5 && keysHint}
         </Box>
       )
     }
     if (menu.step === 'lobby') {
       return (
         <Box flexDirection="column">
-          {header}
+          {space >= 3 && header}
           <Input key="lobby" label={t('Lobby code', '대기실 코드')} placeholder={t('e.g. our-team', '예: 우리팀')} submitLabel={t('Find', '찾기')} autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
           {back}
-          {fieldHint}
+          {space >= 4 && fieldHint}
         </Box>
       )
     }
@@ -1138,56 +1139,85 @@ export const register: Register = on => {
           {` ${colorName(key)}${key === current ? ' ✓' : ''}`}
         </Button>
       )
+      const auto = (
+        <Button key="color-auto" plain hotkey="9" onPress={() => void pickColor($, 'auto')}>
+          {`${t('auto', '자동')}${current ? '' : ' ✓'}`}
+        </Button>
+      )
       return (
         <Box flexDirection="column">
-          {header}
-          <Box flexDirection="row" gap={2}>
-            {COLOR_KEYS.slice(0, 4).map((key, i) => colorButton(key, i))}
-          </Box>
-          <Box flexDirection="row" gap={2}>
-            {COLOR_KEYS.slice(4).map((key, i) => colorButton(key, i + 4))}
-            <Button key="color-auto" plain hotkey="9" onPress={() => void pickColor($, 'auto')}>
-              {`${t('auto', '자동')}${current ? '' : ' ✓'}`}
-            </Button>
-          </Box>
+          {space >= 4 && header}
+          {space >= 3 ? (
+            <>
+              <Box flexDirection="row" gap={2}>
+                {COLOR_KEYS.slice(0, 4).map((key, i) => colorButton(key, i))}
+              </Box>
+              <Box flexDirection="row" gap={2}>
+                {COLOR_KEYS.slice(4).map((key, i) => colorButton(key, i + 4))}
+                {auto}
+              </Box>
+            </>
+          ) : (
+            <Box flexDirection="row" gap={1}>
+              {COLOR_KEYS.map((key, i) => colorButton(key, i))}
+              {auto}
+            </Box>
+          )}
           <Box flexDirection="row" gap={2}>
             <Button key="lang-en" plain hotkey="e" label={`English${lang === 'en' ? ' ✓' : ''}`} onPress={() => void pickLang($, 'en')} />
             <Button key="lang-ko" plain hotkey="k" label={`한국어${lang === 'ko' ? ' ✓' : ''}`} onPress={() => void pickLang($, 'ko')} />
             <Button key="rename" plain hotkey="n" label={t('Change name', '이름 바꾸기')} onPress={() => void goto($, 'name')} />
             {back}
           </Box>
-          {keysHint}
+          {space >= 5 && keysHint}
         </Box>
       )
     }
 
     // Home. Who knocked shows as one row: one name connects at once, more open the friend step.
     const knocked = menu.knocks
-    const rows: { key: string; label: string; run: () => void }[] = [
+    const rows: { key: string; label: string; short: string; run: () => void }[] = [
       ...(knocked.length === 1
-        ? [{ key: 'knocked', label: `🚪 ${t(`Connect with ${knocked[0]} (knocked on you)`, `${knocked[0]} 님과 연결하기 (나에게 노크함)`)}`, run: () => void act($, () => knock($, knocked[0]!)) }]
+        ? [{
+            key: 'knocked',
+            label: `🚪 ${t(`Connect with ${knocked[0]} (knocked on you)`, `${knocked[0]} 님과 연결하기 (나에게 노크함)`)}`,
+            short: `🚪 ${knocked[0]}`,
+            run: () => void act($, () => knock($, knocked[0]!)),
+          }]
         : knocked.length > 1
-          ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you…`, `${namesOf(knocked)} 님이 노크함…`)}`, run: () => void goto($, 'friend') }]
+          ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you…`, `${namesOf(knocked)} 님이 노크함…`)}`, short: `🚪 ${knocked.length}`, run: () => void goto($, 'friend') }]
           : []),
-      { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
-      { key: 'random', label: t('Meet someone at random', '아무나 만나기'), run: () => void goto($, 'random') },
-      { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
-      { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), run: () => void goto($, 'me') },
+      { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), short: t('Knock', '노크'), run: () => void goto($, 'friend') },
+      { key: 'random', label: t('Meet someone at random', '아무나 만나기'), short: t('Random', '랜덤'), run: () => void goto($, 'random') },
+      { key: 'room', label: t('Join a room', '방 들어가기'), short: t('Room', '방'), run: () => void goto($, 'room') },
+      { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), short: t('Settings', '설정'), run: () => void goto($, 'me') },
       ...(chat
         ? [{
             key: 'off',
             label: chat.group ? t('Leave the room', '방에서 나가기') : chat.isConnected ? t('End the chat', '대화 끝내기') : t('Stop waiting', '기다리기 그만두기'),
+            short: t('End', '끝내기'),
             run: () => void act($, () => leave($)),
           }]
         : []),
     ]
+    const button = (row: (typeof rows)[number], i: number, label: string) => (
+      <Button key={row.key} plain hotkey={String(i + 1)} autoFocus={i === 0 ? true : undefined} label={label} onPress={row.run} />
+    )
+    if (space >= rows.length + 1) {
+      return (
+        <Box flexDirection="column">
+          {header}
+          {rows.map((row, i) => button(row, i, row.label))}
+          {space >= rows.length + 2 && keysHint}
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
-        {header}
-        {rows.map((row, i) => (
-          <Button key={row.key} plain hotkey={String(i + 1)} autoFocus={i === 0 ? true : undefined} label={row.label} onPress={row.run} />
-        ))}
-        {keysHint}
+        {space >= 2 && header}
+        <Box flexDirection="row" gap={2}>
+          {rows.map((row, i) => button(row, i, row.short))}
+        </Box>
       </Box>
     )
   })
