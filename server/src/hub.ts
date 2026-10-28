@@ -21,8 +21,9 @@ const COLORS = ['red', 'orange', 'yellow', 'green', 'sky', 'blue', 'purple', 'pi
 export type KnockEvent =
   | { type: 'connected'; peer: string; isRandom: boolean }
   | { type: 'knocked'; from: string }
-  // `group` is set when it was said in a group room, with the sender's `color` if they picked one.
-  | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string }
+  // `group` is set when it was said in a group room, with the sender's `color` if they picked one;
+  // `isClaude` when it is Claude's answer to `from`, who asked with @claude.
+  | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string; isClaude?: true }
   | { type: 'left'; peer: string; reason: 'left' | 'timeout' }
   // Someone came into or went out of this window's group room; count is how many are in it now.
   | { type: 'joined'; name: string; count: number }
@@ -214,7 +215,8 @@ export class Hub extends DurableObject<Env> {
   }
 
   // Hands `text` to the peer, or to everyone else in the group room but those blocked either way.
-  async send(token: string, window: string, text: string): Promise<Result<{ to: string[] }>> {
+  // `isClaude`: the text is Claude's answer to this user's @claude.
+  async send(token: string, window: string, text: string, isClaude = false): Promise<Result<{ to: string[] }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     const live = this.live.get(me)
@@ -222,15 +224,16 @@ export class Hub extends DurableObject<Env> {
     if (!text.trim()) return fail(400, 'empty message')
     if (text.length > MAX_TEXT) return fail(400, `message is over ${MAX_TEXT} chars`)
     const at = Date.now()
+    const claude = isClaude ? { isClaude: true as const } : {}
     if (live.peer) {
-      this.push(live.peer, { type: 'message', from: me, text, at })
+      this.push(live.peer, { type: 'message', from: me, text, at, ...claude })
       return ok({ to: [live.peer] })
     }
     const group = live.group!
     const blocked = this.blocked(me)
     const to = [...(this.groups.get(group) ?? [])].filter(name => name !== me && !blocked.has(name))
     const color = this.colorOf(me) ?? undefined
-    for (const name of to) this.push(name, { type: 'message', from: me, text, at, group, color })
+    for (const name of to) this.push(name, { type: 'message', from: me, text, at, group, color, ...claude })
     return ok({ to })
   }
 

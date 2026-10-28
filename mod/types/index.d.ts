@@ -16,7 +16,7 @@ export type Chat = {
 export type KnockEvent =
   | { type: 'connected'; peer: string; isRandom?: boolean }
   | { type: 'knocked'; from: string }
-  | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string }
+  | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string; isClaude?: true }
   | { type: 'left'; peer: string; reason: 'left' | 'timeout' }
   | { type: 'joined'; name: string; count: number }
   | { type: 'departed'; name: string; count: number; reason: 'left' | 'timeout' }

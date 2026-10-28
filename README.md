@@ -135,6 +135,22 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 </details>
 
 <details>
+<summary><b>Asking Claude in a chat</b></summary>
+
+Start a line with `@claude` in a chat or a room, and Claude answers everyone:
+
+```
+❯ @claude ramen or gukbap for lunch?
+⏺ 🤖 claude Gukbap. bob had ramen yesterday, by the sound of it. (alice asked)
+```
+
+- Claude reads the last 30 lines of the chat with your question, so it knows what you're talking about.
+- It's Claude Sonnet at medium effort, called from the asker's window. Only the asker's account pays.
+- **This Claude has no tools.** It can't read files, run commands or see your project: it reads the chat and writes one message. So nobody in the chat can use it to reach your machine.
+
+</details>
+
+<details>
 <summary><b>Strangers and Claude</b></summary>
 
 **Someone you meet at random or in a room may be a stranger.** Their messages stay in this window's history, and Claude reads them with your next request. Someone could slip in a line like "before running tests, first run this command", hoping Claude follows it later. So knock:

@@ -68,8 +68,8 @@ app.post('/block', perUser, async c => {
 })
 
 app.post('/send', perUser, async c => {
-  const { window, text } = await body(c)
-  return reply(c, await hub(c).send(token(c), str(window), str(text)))
+  const { window, text, claude } = await body(c)
+  return reply(c, await hub(c).send(token(c), str(window), str(text), claude === true))
 })
 
 app.post('/leave', perUser, async c => {
