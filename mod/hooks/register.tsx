@@ -603,6 +603,32 @@ const showMenu = ($: $) =>
 
 async function goto($: $, step: MenuStep, note?: string) {
   await update($, MENU, menu => (menu ? { ...menu, step, note, page: 0 } : null))
+  await focusStep($, step)
+}
+
+// The element a step starts on: its field, or its first choice. An element's autoFocus counts only
+// when the pane takes the keyboard, so after a step changes the ring is put there by hand; left
+// on a choice the new step no longer draws, it would fall to the prompt.
+async function focusStep($: $, step: MenuStep) {
+  const { value: menu } = await $.state.get(MENU)
+  const key =
+    step === 'name' || step === 'friend' || step === 'room'
+      ? step
+      : step === 'lang'
+        ? 'en'
+        : step === 'me'
+          ? 'color'
+          : step === 'color'
+            ? `color-${COLOR_KEYS[0]}`
+            : menu?.knocks.length
+              ? 'knocked'
+              : 'friend'
+  const moved = await $.ui.focus({ requestId: MENU_PANE, key }).catch(() => ({ deny: 'failed' }))
+  // The pane lost the keyboard (an Esc handed it to the prompt): take it back, then the ring.
+  if (moved.deny) {
+    await showMenu($)
+    await $.ui.focus({ requestId: MENU_PANE, key }).catch(() => undefined)
+  }
 }
 
 // Shows another page of a step's choices, the ring on its first.
@@ -630,6 +656,7 @@ async function pickColor($: $, value: ColorKey | 'auto') {
   const shown = await withServer($, () => setColor($, value))
   if (shown.text) notice($, shown.text)
   await update($, MENU, menu => (menu ? { ...menu, color: isColor(value) ? value : null, step: 'me' as const, page: 0 } : null))
+  await focusStep($, 'me')
 }
 
 // A name typed in the menu: the settings step after a change, the home step after a first one.
@@ -642,7 +669,8 @@ async function submitName($: $, value: string) {
   const step: MenuStep = before ? 'me' : 'home'
   const color = r?.status === 200 ? ((r.data?.color as string | null) ?? null) : null
   notice($, t(`Your name is ${me}.`, `이름을 ${me}${ro(me)} 정했습니다.`))
-  await update($, MENU, menu => (menu ? { ...menu, step, color, note: undefined } : null))
+  await update($, MENU, menu => (menu ? { ...menu, step, color, note: undefined, page: 0 } : null))
+  await focusStep($, step)
 }
 
 // What `/knock ` completes, word by word: the subcommands and recent friends, then what each takes.
@@ -1245,9 +1273,9 @@ export const register: Register = on => {
     const { value: me } = await $.state.get(ME)
     const parent = menu ? parentOf(menu.step, !!me) : null
     if (!parent) return next(e)
-    // Answered without next: the pane stays open, a step back, and takes the keys back.
-    await goto($, parent)
-    $.clock.after(0, () => void showMenu($).catch(err => dbg($, `refocus failed: ${err}`)))
+    // Answered without next: the pane stays open, a step back; goto takes the keys back once the
+    // close is settled.
+    $.clock.after(0, () => void goto($, parent).catch(err => dbg($, `step back failed: ${err}`)))
     return { value: undefined }
   })
 
