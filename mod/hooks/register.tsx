@@ -591,9 +591,9 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
 // Where Esc and Back lead from a step: home, or the step it was entered from. None before a name
 // is picked, nor from home: there Esc closes the menu.
 function parentOf(step: MenuStep, hasName: boolean): MenuStep | null {
-  if (!hasName || step === 'home' || step === 'lang') return null
+  if (!hasName || step === 'home') return null
   if (step === 'lobby') return 'random'
-  if (step === 'name') return 'me'
+  if (step === 'name' || step === 'color' || step === 'lang') return 'me'
   return 'home'
 }
 
@@ -603,7 +603,13 @@ const showMenu = ($: $) =>
   $.ui.open({ id: MENU_PANE, title: 'knock', focus: true, closeOnEscape: true, holdToasts: true, rows: 20 })
 
 async function goto($: $, step: MenuStep, note?: string) {
-  await update($, MENU, menu => (menu ? { ...menu, step, note } : null))
+  await update($, MENU, menu => (menu ? { ...menu, step, note, page: 0 } : null))
+}
+
+// Shows another page of a step's choices, the ring on its first.
+async function turnPage($: $, page: number, focusKey: string) {
+  await update($, MENU, menu => (menu ? { ...menu, page } : null))
+  void $.ui.focus({ requestId: MENU_PANE, key: focusKey }).catch(() => undefined)
 }
 
 // Closes the menu and runs what was picked in it, saying what came of it.
@@ -616,13 +622,15 @@ async function act($: $, run: () => Promise<string>) {
 // A language picked in the menu: on the first run it leads on to the name, in the settings it stays.
 async function pickLang($: $, value: Lang) {
   await setLang($, value)
-  await update($, MENU, menu => (menu ? { ...menu, step: menu.step === 'lang' ? 'name' : menu.step, note: undefined } : null))
+  const { value: me } = await $.state.get(ME)
+  // The first run goes on to the name; from the settings, back to them.
+  await goto($, me ? 'me' : 'name')
 }
 
 async function pickColor($: $, value: ColorKey | 'auto') {
   const shown = await withServer($, () => setColor($, value))
   if (shown.text) notice($, shown.text)
-  await update($, MENU, menu => (menu ? { ...menu, color: isColor(value) ? value : null } : null))
+  await update($, MENU, menu => (menu ? { ...menu, color: isColor(value) ? value : null, step: 'me' as const, page: 0 } : null))
 }
 
 // A name typed in the menu: the settings step after a change, the home step after a first one.
@@ -1037,10 +1045,11 @@ export const register: Register = on => {
     return { suggestions: [...found.suggestions, ...(await completions($, (typed[1] ?? '').split(/\s+/)))] }
   })
 
-  // The menu: choices with their keys (1: …), the first one focused, as Claude Code's own questions
-  // read. A step that asks for text has the field focused and its choices under it. Each step fits
-  // the rows the pane got (`space`): a body that overflows scrolls under the arrows instead of moving
-  // between choices. Short of rows, the hints go first, then the home's choices share one row.
+  // The menu: choices one per row with their keys (1: …), the first one focused, as Claude Code's
+  // own questions read; never side by side, as Left and Right go to Claude Code, not the pane. A
+  // step that asks for text has the field focused and its choices under it. Each step fits the rows
+  // the pane got (`space`): a body that overflows scrolls under the arrows instead of moving between
+  // choices, so short of rows the hints go, then the name line, then the choices come in pages.
   on('ui.render', { component: 'Pane', requestId: MENU_PANE }, async ($, e) => {
     const space = e.props.scroll.bodyRows
     const table = $.ui.resolve(e)
@@ -1065,35 +1074,69 @@ export const register: Register = on => {
     )
     const parent = parentOf(menu.step, !!me)
     const escSays = parent ? t('Esc back', 'Esc 뒤로') : t('Esc closes', 'Esc 닫기')
-    const keysHint = <Text dimColor>{`${t('Key, or ↑↓ Enter', '키, 또는 ↑↓ Enter')} · ${escSays}`}</Text>
     const goBack = () => void goto($, parent ?? 'home')
-    const back = <Button key="back" plain hotkey="0" label={t('← Back', '← 뒤로')} onPress={goBack} />
     // Under a field a digit is typed into it, so the way back there has no key.
-    const backRow = <Button key="back" plain label={t('← Back', '← 뒤로')} onPress={goBack} />
-    // Under a field: recent friends or rooms on one row, then the way back.
-    const below = (list: string[], run: (value: string) => Promise<string>) => (
-      <Box flexDirection="row" gap={2}>
-        {list.length > 0 && <Text dimColor>{t('Recent:', '최근:')}</Text>}
-        {list.slice(0, 4).map(one => (
-          <Button key={`recent-${one}`} plain label={one} onPress={() => void act($, () => run(one))} />
-        ))}
-        {backRow}
-      </Box>
-    )
-    const fieldHint = <Text dimColor>{`${t('Enter saves · Tab moves', 'Enter 저장 · Tab 이동')} · ${escSays}`}</Text>
+    const back = (hasKey: boolean): Row => ({ key: 'back', hotkey: hasKey ? '0' : undefined, label: t('← Back', '← 뒤로'), run: goBack })
 
-    if (menu.step === 'lang') {
+    type Row = { key: string; hotkey?: string; label?: string; content?: typeof header; run: () => void }
+    // The step: its lead (a line, or the field), then its rows, a page of them if they do not fit.
+    const list = (rows: Row[], lead: typeof header | null, hint: string) => {
+      const fixed = lead ? 1 : 0
+      const isPaged = rows.length + fixed > space
+      // Paged, the name line keeps its row only with room to spare: the rows are what the step is for.
+      const withHeader = isPaged ? space - fixed >= 7 : rows.length + fixed + 1 <= space
+      const perPage = isPaged ? Math.max(1, space - fixed - (withHeader ? 1 : 0) - 1) : rows.length
+      const pages = Math.max(1, Math.ceil(rows.length / perPage))
+      const page = Math.min(menu.page ?? 0, pages - 1)
+      const shown = rows.slice(page * perPage, (page + 1) * perPage)
+      const left = rows.length - (page + 1) * perPage
+      const next = (page + 1) % pages
       return (
         <Box flexDirection="column">
-          {header}
-          <Text>Choose a language · 언어를 고르세요</Text>
-          <Button key="en" plain hotkey="1" label="English" autoFocus onPress={() => void pickLang($, 'en')} />
-          <Button key="ko" plain hotkey="2" label="한국어" onPress={() => void pickLang($, 'ko')} />
-          {space >= 5 && <Text dimColor>Press 1 or 2 · 1이나 2를 누르세요</Text>}
+          {withHeader && header}
+          {lead}
+          {shown.map((row, i) =>
+            row.content ? (
+              <Button key={row.key} plain hotkey={row.hotkey} autoFocus={!lead && i === 0 ? true : undefined} onPress={row.run}>
+                {row.content}
+              </Button>
+            ) : (
+              <Button key={row.key} plain hotkey={row.hotkey} autoFocus={!lead && i === 0 ? true : undefined} label={row.label} onPress={row.run} />
+            ),
+          )}
+          {isPaged && (
+            <Button
+              key="more"
+              plain
+              hotkey="m"
+              label={left > 0 ? t(`… ${left} more (m)`, `… ${left}개 더 (m)`) : t('… back to the first (m)', '… 처음으로 (m)')}
+              onPress={() => void turnPage($, next, rows[next * perPage]!.key)}
+            />
+          )}
+          {!isPaged && rows.length + fixed + 2 <= space && <Text dimColor>{hint}</Text>}
         </Box>
       )
     }
+    const keysHint = `${t('Key, or ↑↓ Enter', '키, 또는 ↑↓ Enter')} · ${escSays}`
+    const fieldHint = `${t('Enter saves · ↓ to the list', 'Enter 저장 · ↓ 목록으로')} · ${escSays}`
+    const recentRows = (list: string[], run: (value: string) => Promise<string>): Row[] =>
+      list.slice(0, 6).map(one => ({ key: `recent-${one}`, label: `${t('recent', '최근')}: ${one}`, run: () => void act($, () => run(one)) }))
+
+    if (menu.step === 'lang') {
+      return list(
+        [
+          { key: 'en', hotkey: '1', label: `English${me && lang === 'en' ? ' ✓' : ''}`, run: () => void pickLang($, 'en') },
+          { key: 'ko', hotkey: '2', label: `한국어${me && lang === 'ko' ? ' ✓' : ''}`, run: () => void pickLang($, 'ko') },
+          ...(me ? [back(true)] : []),
+        ],
+        <Text>Choose a language · 언어를 고르세요</Text>,
+        me ? keysHint : 'Press 1 or 2 · 1이나 2를 누르세요',
+      )
+    }
     if (menu.step === 'name' || !me) {
+      const field = (
+        <Input key="name" label={t('Name', '이름')} placeholder={t('e.g. alice', '예: alice')} submitLabel={t('Save', '정하기')} autoFocus onSubmit={(value: string) => void submitName($, value)} />
+      )
       return (
         <Box flexDirection="column">
           {space >= 4 && header}
@@ -1102,144 +1145,117 @@ export const register: Register = on => {
             <Text dimColor>{t(' 2-20 of a-z 0-9 _ -', ' 영문 소문자·숫자·_·- 2~20자')}</Text>
           </Text>
           {menu.note && <Text color="#d9534f">{menu.note}</Text>}
-          <Input key="name" label={t('Name', '이름')} placeholder={t('e.g. alice', '예: alice')} submitLabel={t('Save', '정하기')} autoFocus onSubmit={(value: string) => void submitName($, value)} />
-          {me ? backRow : null}
-          {space >= (menu.note ? 5 : 4) + (me ? 1 : 0) && fieldHint}
+          {field}
+          {space >= (menu.note ? 5 : 4) + 1 && <Text dimColor>{`${t('Enter saves', 'Enter 저장')} · ${escSays}`}</Text>}
         </Box>
       )
     }
     if (menu.step === 'friend') {
-      return (
-        <Box flexDirection="column">
-          {space >= 3 && header}
-          <Input key="friend" label={t("Friend's name", '친구 이름')} placeholder={t('e.g. bob', '예: bob')} submitLabel={t('Knock', '노크')} autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
-          {below([...new Set([...menu.knocks, ...menu.friends])], value => knock($, value))}
-          {space >= 4 && <Text dimColor>{`${t('Knock on each other to connect', '서로 노크하면 연결됩니다')} · ${escSays}`}</Text>}
-        </Box>
+      const field = (
+        <Input key="friend" label={t("Friend's name", '친구 이름')} placeholder={t('e.g. bob', '예: bob')} submitLabel={t('Knock', '노크')} autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
       )
+      return list([...recentRows([...new Set([...menu.knocks, ...menu.friends])], value => knock($, value)), back(false)], field, fieldHint)
     }
     if (menu.step === 'room') {
-      return (
-        <Box flexDirection="column">
-          {space >= 3 && header}
-          <Input key="room" label={t('Room', '방 이름')} placeholder={t('e.g. lunch-7k2q', '예: 점심팟-7k2q')} submitLabel={t('Join', '들어가기')} autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
-          {below(menu.rooms, value => room($, value))}
-          {space >= 4 && <Text dimColor>{t(`Up to ${GROUP_MAX} who type the same name; pick one no one would guess`, `같은 이름을 입력한 최대 ${GROUP_MAX}명 · 남이 맞히기 어려운 이름으로`)}</Text>}
-        </Box>
+      const field = (
+        <Input key="room" label={t('Room', '방 이름')} placeholder={t('e.g. lunch-7k2q', '예: 점심팟-7k2q')} submitLabel={t('Join', '들어가기')} autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
       )
-    }
-    if (menu.step === 'random') {
-      return (
-        <Box flexDirection="column">
-          {space >= 4 && header}
-          <Button key="open" plain hotkey="1" autoFocus label={t('The open lobby: anyone on knock', '전체 대기실: knock을 쓰는 누구나')} onPress={() => void act($, () => random($, ''))} />
-          <Button key="code" plain hotkey="2" label={t('A lobby with a code: only those who type it…', '코드가 있는 대기실: 같은 코드끼리만…')} onPress={() => void goto($, 'lobby')} />
-          {back}
-          {space >= 5 && keysHint}
-        </Box>
-      )
+      return list([...recentRows(menu.rooms, value => room($, value)), back(false)], field, fieldHint)
     }
     if (menu.step === 'lobby') {
-      return (
-        <Box flexDirection="column">
-          {space >= 3 && header}
-          <Input key="lobby" label={t('Lobby code', '대기실 코드')} placeholder={t('e.g. our-team', '예: 우리팀')} submitLabel={t('Find', '찾기')} autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
-          {backRow}
-          {space >= 4 && fieldHint}
-        </Box>
+      const field = (
+        <Input key="lobby" label={t('Lobby code', '대기실 코드')} placeholder={t('e.g. our-team', '예: 우리팀')} submitLabel={t('Find', '찾기')} autoFocus onSubmit={(value: string) => void act($, () => random($, value))} />
+      )
+      return list([back(false)], field, fieldHint)
+    }
+    if (menu.step === 'random') {
+      return list(
+        [
+          { key: 'open', hotkey: '1', label: t('The open lobby: anyone on knock', '전체 대기실: knock을 쓰는 누구나'), run: () => void act($, () => random($, '')) },
+          { key: 'code', hotkey: '2', label: t('A lobby with a code: only those who type it…', '코드가 있는 대기실: 같은 코드끼리만…'), run: () => void goto($, 'lobby') },
+          back(true),
+        ],
+        null,
+        keysHint,
       )
     }
     if (menu.step === 'me') {
+      const color = colorFor(me, menu.color)
+      return list(
+        [
+          {
+            key: 'color',
+            hotkey: '1',
+            content: (
+              <Text>
+                {`${t("Name's color", '이름 색')}: `}
+                <Text color={COLORS[color].hex}>●</Text>
+                {` ${colorName(color)}${isColor(menu.color) ? '' : t(' (auto)', ' (자동)')} …`}
+              </Text>
+            ),
+            run: () => void goto($, 'color'),
+          },
+          { key: 'lang', hotkey: '2', label: `${t('Language', '언어')}: ${lang === 'ko' ? '한국어' : 'English'} …`, run: () => void goto($, 'lang') },
+          { key: 'rename', hotkey: '3', label: `${t('Name', '이름')}: ${me} …`, run: () => void goto($, 'name') },
+          back(true),
+        ],
+        null,
+        keysHint,
+      )
+    }
+    if (menu.step === 'color') {
       const current = isColor(menu.color) ? menu.color : null
-      // The name above shows the color picked; each choice is a dot of its color.
-      const colorButton = (key: ColorKey, i: number) => (
-        <Button key={`color-${key}`} plain hotkey={String(i + 1)} autoFocus={key === (current ?? colorFor(me)) ? true : undefined} onPress={() => void pickColor($, key)}>
-          <Text color={COLORS[key].hex}>●</Text>
-          {` ${colorName(key)}${key === current ? ' ✓' : ''}`}
-        </Button>
-      )
-      const auto = (
-        <Button key="color-auto" plain hotkey="9" onPress={() => void pickColor($, 'auto')}>
-          {`${t('auto', '자동')}${current ? '' : ' ✓'}`}
-        </Button>
-      )
-      return (
-        <Box flexDirection="column">
-          {space >= 4 && header}
-          {space >= 3 ? (
-            <>
-              <Box flexDirection="row" gap={2}>
-                {COLOR_KEYS.slice(0, 4).map((key, i) => colorButton(key, i))}
-              </Box>
-              <Box flexDirection="row" gap={2}>
-                {COLOR_KEYS.slice(4).map((key, i) => colorButton(key, i + 4))}
-                {auto}
-              </Box>
-            </>
-          ) : (
-            <Box flexDirection="row" gap={1}>
-              {COLOR_KEYS.map((key, i) => colorButton(key, i))}
-              {auto}
-            </Box>
-          )}
-          <Box flexDirection="row" gap={2}>
-            <Button key="lang-en" plain hotkey="e" label={`English${lang === 'en' ? ' ✓' : ''}`} onPress={() => void pickLang($, 'en')} />
-            <Button key="lang-ko" plain hotkey="k" label={`한국어${lang === 'ko' ? ' ✓' : ''}`} onPress={() => void pickLang($, 'ko')} />
-            <Button key="rename" plain hotkey="n" label={t('Change name', '이름 바꾸기')} onPress={() => void goto($, 'name')} />
-            {back}
-          </Box>
-          {space >= 5 && keysHint}
-        </Box>
+      return list(
+        [
+          ...COLOR_KEYS.map((key, i) => ({
+            key: `color-${key}`,
+            hotkey: String(i + 1),
+            content: (
+              <Text>
+                <Text color={COLORS[key].hex}>●</Text>
+                {' '}
+                <Text color={COLORS[key].hex} weight="bold">
+                  {me}
+                </Text>
+                {` ${colorName(key)}${key === current ? ' ✓' : ''}`}
+              </Text>
+            ),
+            run: () => void pickColor($, key),
+          })),
+          { key: 'color-auto', hotkey: '9', label: `${t('auto, by your name', '자동, 이름에 따라')} (${colorName(colorFor(me))})${current ? '' : ' ✓'}`, run: () => void pickColor($, 'auto') },
+          back(true),
+        ],
+        null,
+        keysHint,
       )
     }
 
     // Home. Who knocked shows as one row: one name connects at once, more open the friend step.
     const knocked = menu.knocks
-    const rows: { key: string; label: string; short: string; run: () => void }[] = [
-      ...(knocked.length === 1
-        ? [{
-            key: 'knocked',
-            label: `🚪 ${t(`Connect with ${knocked[0]} (knocked on you)`, `${knocked[0]} 님과 연결하기 (나에게 노크함)`)}`,
-            short: `🚪 ${knocked[0]}`,
-            run: () => void act($, () => knock($, knocked[0]!)),
-          }]
-        : knocked.length > 1
-          ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you…`, `${namesOf(knocked)} 님이 노크함…`)}`, short: `🚪 ${knocked.length}`, run: () => void goto($, 'friend') }]
+    return list(
+      [
+        ...(knocked.length === 1
+          ? [{ key: 'knocked', label: `🚪 ${t(`Connect with ${knocked[0]} (knocked on you)`, `${knocked[0]} 님과 연결하기 (나에게 노크함)`)}`, run: () => void act($, () => knock($, knocked[0]!)) }]
+          : knocked.length > 1
+            ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you…`, `${namesOf(knocked)} 님이 노크함…`)}`, run: () => void goto($, 'friend') }]
+            : []),
+        { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
+        { key: 'random', label: t('Meet someone at random', '아무나 만나기'), run: () => void goto($, 'random') },
+        { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
+        { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), run: () => void goto($, 'me') },
+        ...(chat
+          ? [{
+              key: 'off',
+              label: chat.group ? t('Leave the room', '방에서 나가기') : chat.isConnected ? t('End the chat', '대화 끝내기') : t('Stop waiting', '기다리기 그만두기'),
+              run: () => void act($, () => leave($)),
+            }]
           : []),
-      { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), short: t('Knock', '노크'), run: () => void goto($, 'friend') },
-      { key: 'random', label: t('Meet someone at random', '아무나 만나기'), short: t('Random', '랜덤'), run: () => void goto($, 'random') },
-      { key: 'room', label: t('Join a room', '방 들어가기'), short: t('Room', '방'), run: () => void goto($, 'room') },
-      { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), short: t('Settings', '설정'), run: () => void goto($, 'me') },
-      ...(chat
-        ? [{
-            key: 'off',
-            label: chat.group ? t('Leave the room', '방에서 나가기') : chat.isConnected ? t('End the chat', '대화 끝내기') : t('Stop waiting', '기다리기 그만두기'),
-            short: t('End', '끝내기'),
-            run: () => void act($, () => leave($)),
-          }]
-        : []),
-    ]
-    const button = (row: (typeof rows)[number], i: number, label: string) => (
-      <Button key={row.key} plain hotkey={String(i + 1)} autoFocus={i === 0 ? true : undefined} label={label} onPress={row.run} />
-    )
-    if (space >= rows.length + 1) {
-      return (
-        <Box flexDirection="column">
-          {header}
-          {rows.map((row, i) => button(row, i, row.label))}
-          {space >= rows.length + 2 && keysHint}
-        </Box>
-      )
-    }
-    return (
-      <Box flexDirection="column">
-        {space >= 2 && header}
-        <Box flexDirection="row" gap={2}>
-          {rows.map((row, i) => button(row, i, row.short))}
-        </Box>
-      </Box>
+      ].map((row, i) => ({ ...row, hotkey: String(i + 1) })),
+      null,
+      keysHint,
     )
   })
+
   on('ui.close', { id: MENU_PANE }, async ($, e, next) => {
     if (e.origin.kind !== 'person') return next(e)
     const { value: menu } = await $.state.get(MENU)

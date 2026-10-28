@@ -25,7 +25,7 @@ export type KnockEvent =
 
 // The /knock menu pane: the step it shows, what it read when it opened (the name's color, who
 // knocked, recent friends and rooms), and a line to say after an action in it.
-export type MenuStep = 'lang' | 'name' | 'home' | 'friend' | 'room' | 'random' | 'lobby' | 'me'
+export type MenuStep = 'lang' | 'name' | 'home' | 'friend' | 'room' | 'random' | 'lobby' | 'me' | 'color'
 export type Menu = {
   step: MenuStep
   color: string | null
@@ -33,6 +33,8 @@ export type Menu = {
   friends: string[]
   rooms: string[]
   note?: string
+  // Which page of the step's choices shows, when the pane is too short for them all.
+  page?: number
 }
 
 declare module 'claude-code' {
