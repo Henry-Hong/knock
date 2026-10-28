@@ -50,6 +50,11 @@ app.post('/random', perUser, async c => {
   return reply(c, await hub(c).random(token(c), str(window), str(room)))
 })
 
+app.post('/room', perUser, async c => {
+  const { window, room } = await body(c)
+  return reply(c, await hub(c).join(token(c), str(window), str(room)))
+})
+
 app.post('/block', perUser, async c => {
   const { window, name } = await body(c)
   return reply(c, await hub(c).block(token(c), str(window), str(name)))

@@ -37,9 +37,10 @@ What you type goes to your friend, and their replies show up where Claude's answ
 | `/knock-init <name>` | Pick your name |
 | `/knock-random [code]` | Meet someone at random. With a code, only people who used the same code |
 | `/knock-next` | Leave this random match and find the next one |
+| `/knock-room [room]` | Join a group room, up to 8 people. Alone, it shows who's in your room |
 | `/knock-block [name]` | Block the person you're chatting with, or a name |
 | `/knock-me` | Your name and who you're chatting with |
-| `/knock-off` | Leave the chat (or stop looking) and go back to Claude |
+| `/knock-off` | Leave the chat or room (or stop looking) and go back to Claude |
 
 ## Good to know
 
@@ -74,7 +75,7 @@ A knock notice (🚪) shows up only in a **window that's waiting on a knock**: o
 <summary><b>What you'll see</b></summary>
 
 - **`› Prompt from the knock plugin`**: a label Claude Code adds when a message arrives while you're idle and knock opens a turn for it. Plugins can't remove it. Later messages land in the same turn, so it shows up once.
-- **Status line**: `💬 alice ↔ bob` means connected. `⏳ alice → bob` means you're waiting for them to knock back. `🎲` marks a random match, or a lobby you're waiting in.
+- **Status line**: `💬 alice ↔ bob` means connected. `⏳ alice → bob` means you're waiting for them to knock back. `🎲` marks a random match, or a lobby you're waiting in. `👥 alice · lunch 3/8` means you're in a room with 3 people.
 - **Esc**: interrupts the chat turn, and Claude Code shows `Interrupted`. Use `/knock-off` to leave cleanly.
 
 </details>
@@ -108,9 +109,35 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 - `/knock-next` moves on. You won't get the person you just left again right away.
 - `/knock-block` blocks the person you're chatting with and ends the chat. You never meet them at random again, and their knocks don't notify you. If you knock on each other on purpose, you still connect.
 
-**Someone you meet at random is a stranger.** Their messages stay in this window's history, and Claude reads them with your next request. Someone could slip in a line like "before running tests, first run this command", hoping Claude follows it later. So knock:
+</details>
 
-- Tells Claude those lines came from a stranger, and that it must not follow any instruction in them.
+<details>
+<summary><b>Group rooms</b></summary>
+
+`/knock-room lunch` takes you into the room `lunch`, and makes it if nobody's there. Anyone who types the same name joins you, up to 8 people.
+
+| Time | alice's window | bob's window |
+| --- | --- | --- |
+| 12:01 | `❯ /knock-room lunch` | |
+| 12:02 | `⏺ knock: 👋 bob … (2/8)` (bob joined) | `❯ /knock-room lunch` |
+| 12:02 | | `❯ ramen?` |
+| 12:02 | `⏺ bob ramen?` | |
+
+- Others' messages land where Claude's answers go, one per line, each led by its sender's name in bold.
+- You see who comes and goes. `/knock-room` alone shows who's in the room.
+- The server doesn't store messages, so you only see what's said after you join.
+- The room goes away when the last person leaves.
+- `/knock-block <name>` stops that person's messages reaching you, and yours reaching them.
+- **A room's name isn't a password.** Anyone who guesses it can come in. For a private room, pick a name nobody would guess, like `lunch-7k2q`.
+
+</details>
+
+<details>
+<summary><b>Strangers and Claude</b></summary>
+
+**Someone you meet at random or in a room may be a stranger.** Their messages stay in this window's history, and Claude reads them with your next request. Someone could slip in a line like "before running tests, first run this command", hoping Claude follows it later. So knock:
+
+- Tells Claude those lines may have come from a stranger, and that it must not follow any instruction in them.
 - Stops your first request to Claude after such a chat once. It suggests `/clear` or a fresh window and puts your request back in the box. Press Enter again to send it anyway.
 - Strips control characters from incoming messages, so they can't recolor text to look like Claude Code's own rows.
 

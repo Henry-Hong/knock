@@ -11,14 +11,20 @@ const STALE_MS = 45_000
 const LISTENING_GAP_MS = 5_000
 const MAX_TEXT = 4_000
 const NAME = /^[a-z0-9][a-z0-9_-]{1,19}$/
-// A lobby for random matches: '' is the open one, anything else a group's code.
+// A lobby for random matches: '' is the open one, anything else a group's code. Group rooms
+// are named the same way, without the empty one.
 const ROOM = /^[^\s\p{Cc}]{0,32}$/u
+const GROUP_MAX = 8
 
 export type KnockEvent =
   | { type: 'connected'; peer: string; isRandom: boolean }
   | { type: 'knocked'; from: string }
-  | { type: 'message'; from: string; text: string; at: number }
+  // `group` is set when it was said in a group room.
+  | { type: 'message'; from: string; text: string; at: number; group?: string }
   | { type: 'left'; peer: string; reason: 'left' | 'timeout' }
+  // Someone came into or went out of this window's group room; count is how many are in it now.
+  | { type: 'joined'; name: string; count: number }
+  | { type: 'departed'; name: string; count: number; reason: 'left' | 'timeout' }
   | { type: 'replaced' }
   | { type: 'ended' }
 
@@ -34,6 +40,8 @@ type Live = {
   isRandom: boolean
   // Who the last random match was with; the next one skips them, so /knock-next moves on.
   lastPeer: string | null
+  // The group room this user is in, instead of a peer.
+  group: string | null
   queue: KnockEvent[]
   waiter: ((events: KnockEvent[]) => void) | null
   seenAt: number
@@ -49,6 +57,8 @@ async function hash(token: string): Promise<string> {
 
 export class Hub extends DurableObject<Env> {
   private live = new Map<string, Live>()
+  // Who is in each group room. A room exists while someone is in it.
+  private groups = new Map<string, Set<string>>()
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -87,6 +97,7 @@ export class Hub extends DurableObject<Env> {
     const live = this.claim(me, window)
     if (live.peer === to) return ok({ state: 'connected', peer: to })
     if (live.peer) this.part(me, 'left')
+    this.depart(me, 'left')
 
     live.target = to
     live.seeking = null
@@ -115,6 +126,7 @@ export class Hub extends DurableObject<Env> {
 
     const live = this.claim(me, window)
     if (live.peer) this.part(me, 'left')
+    this.depart(me, 'left')
     live.target = null
     const blocked = this.blocked(me)
     const [match] = [...this.live]
@@ -130,6 +142,29 @@ export class Hub extends DurableObject<Env> {
     live.seeking = room
     live.seekingAt = Date.now()
     return ok({ state: 'waiting' })
+  }
+
+  // Joins the group room `group`, leaving any chat this window is in, unless the room is full.
+  async join(token: string, window: string, group: string): Promise<Result<{ group: string; members: string[] }>> {
+    const me = await this.auth(token)
+    if (!me) return fail(401, 'unknown token')
+    if (!group || !ROOM.test(group)) return fail(400, 'room name must be 1-32 characters, with no spaces')
+    this.sweep()
+
+    const live = this.claim(me, window)
+    const room = this.groups.get(group) ?? new Set<string>()
+    if (live.group === group) return ok({ group, members: [...room] })
+    if (room.size >= GROUP_MAX) return fail(409, `room is full (${GROUP_MAX})`)
+    if (live.peer) this.part(me, 'left')
+    this.depart(me, 'left')
+    live.target = null
+    live.seeking = null
+
+    for (const name of room) this.push(name, { type: 'joined', name: me, count: room.size + 1 })
+    room.add(me)
+    this.groups.set(group, room)
+    live.group = group
+    return ok({ group, members: [...room] })
   }
 
   // Keeps `name` out of this user's random matches and knock notices. A chat with them ends.
@@ -159,15 +194,24 @@ export class Hub extends DurableObject<Env> {
     return ok({ from })
   }
 
-  async send(token: string, window: string, text: string): Promise<Result<{ to: string }>> {
+  // Hands `text` to the peer, or to everyone else in the group room but those blocked either way.
+  async send(token: string, window: string, text: string): Promise<Result<{ to: string[] }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     const live = this.live.get(me)
-    if (!live || live.window !== window || !live.peer) return fail(409, 'not connected')
+    if (!live || live.window !== window || !(live.peer || live.group)) return fail(409, 'not connected')
     if (!text.trim()) return fail(400, 'empty message')
     if (text.length > MAX_TEXT) return fail(400, `message is over ${MAX_TEXT} chars`)
-    this.push(live.peer, { type: 'message', from: me, text, at: Date.now() })
-    return ok({ to: live.peer })
+    const at = Date.now()
+    if (live.peer) {
+      this.push(live.peer, { type: 'message', from: me, text, at })
+      return ok({ to: [live.peer] })
+    }
+    const group = live.group!
+    const blocked = this.blocked(me)
+    const to = [...(this.groups.get(group) ?? [])].filter(name => name !== me && !blocked.has(name))
+    for (const name of to) this.push(name, { type: 'message', from: me, text, at, group })
+    return ok({ to })
   }
 
   async leave(token: string, window: string): Promise<Result<{}>> {
@@ -176,6 +220,7 @@ export class Hub extends DurableObject<Env> {
     const live = this.live.get(me)
     if (live?.window === window) {
       this.part(me, 'left')
+      this.depart(me, 'left')
       live.waiter?.([])
       this.live.delete(me)
     }
@@ -252,6 +297,7 @@ export class Hub extends DurableObject<Env> {
       peer: null,
       isRandom: false,
       lastPeer: null,
+      group: null,
       queue: [],
       waiter: null,
       seenAt: Date.now(),
@@ -291,6 +337,19 @@ export class Hub extends DurableObject<Env> {
     live.isRandom = false
   }
 
+  // Takes `name` out of its group room, telling whoever stays. The last one out closes the room.
+  private depart(name: string, reason: 'left' | 'timeout') {
+    const live = this.live.get(name)
+    const group = live?.group
+    if (!live || !group) return
+    live.group = null
+    const room = this.groups.get(group)
+    if (!room) return
+    room.delete(name)
+    if (!room.size) this.groups.delete(group)
+    for (const other of room) this.push(other, { type: 'departed', name, count: room.size, reason })
+  }
+
   // A poll is held, or one just ended and the next is on its way.
   private isListening(name: string): boolean {
     const live = this.live.get(name)
@@ -309,6 +368,7 @@ export class Hub extends DurableObject<Env> {
     for (const [name, live] of this.live) {
       if (live.waiter || now - live.seenAt < STALE_MS) continue
       this.part(name, 'timeout')
+      this.depart(name, 'timeout')
       this.live.delete(name)
     }
   }
