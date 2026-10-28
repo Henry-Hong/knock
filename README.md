@@ -5,6 +5,8 @@ English | [한국어](README.ko.md)
 **Chat with a friend without leaving Claude Code.**
 What you type goes to your friend, and their replies show up where Claude's answers usually do. No model calls, so no tokens.
 
+![knock: two Claude Code windows chatting](docs/knock-english.gif)
+
 | Time | alice's window | bob's window |
 | --- | --- | --- |
 | 12:01 | `❯ lunch?` | |
