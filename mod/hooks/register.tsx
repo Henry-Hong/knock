@@ -24,14 +24,24 @@ const TICK = { plugin: 'knock', key: 'tick' } as const
 const ONLINE = { plugin: 'knock', key: 'online' } as const
 
 // What knock says things in: English unless the person picked Korean. Kept for the machine in
-// $.store, read when a window starts and before each command, so every window follows a change.
+// $.store, so every window follows a change: read when a window starts, before each command, as
+// /knock is typed and as messages come.
 type Lang = 'en' | 'ko'
 let lang: Lang = 'en'
 // A text in the language picked, English first.
 const t = (en: string, ko: string) => (lang === 'ko' ? ko : en)
-const loadLang = async ($: $) => {
-  lang = (await $.store.get('lang')) === 'ko' ? 'ko' : 'en'
+// Takes a language up. What Claude Code keeps drawn in the old one is drawn again: the /knock line
+// in the typeahead (described once a session otherwise), the panes and the status line.
+async function useLang($: $, picked: Lang) {
+  if (picked === lang) return
+  lang = picked
+  $.clock.after(0, () => {
+    $.ui.invalidate('command.describe')
+    $.ui.invalidate('ui.render')
+    void $.state.get(CHAT).then(({ value }) => showStatus($, value ?? null))
+  })
 }
+const loadLang = async ($: $) => useLang($, (await $.store.get('lang')) === 'ko' ? 'ko' : 'en')
 
 // The server holds a poll up to 20 s; a mod's fetch gives up at 30 s.
 const POLL_HOLD_MS = 20_000
@@ -358,6 +368,7 @@ async function endChat($: $) {
 
 // Messages wait in the inbox for a chat turn to show them; the rest is said at once.
 async function take($: $, events: KnockEvent[]) {
+  if (events.length) await loadLang($)
   for (const event of events) {
     if (event.type === 'message') {
       const m = { ...event, text: clean(event.text) }
@@ -603,7 +614,7 @@ async function setColor($: $, value: string): Promise<string> {
   if (r.status !== 200) return errorOf(r)
   const label = colorName(colorFor(me, key))
   return key
-    ? t(`Your name is ${label} now.`, `이름 색을 ${label}${ro(label)} 바꿨습니다.`)
+    ? t(`Your name's color is ${label} now.`, `이름 색을 ${label}${ro(label)} 바꿨습니다.`)
     : t(`Your name's color is automatic again (${label}).`, `이름 색을 자동(${label})${ro(label)} 되돌렸습니다.`)
 }
 
@@ -612,7 +623,7 @@ async function setLang($: $, value: string): Promise<string> {
   const picked: Lang | null = ['en', 'english', '영어'].includes(wanted) ? 'en' : ['ko', 'korean', '한국어'].includes(wanted) ? 'ko' : null
   if (!picked) return t(`No such language: ${value}. Pick en or ko`, `모르는 언어입니다: ${value}. en 또는 ko를 골라 주세요`)
   await $.store.set('lang', picked)
-  lang = picked
+  await useLang($, picked)
   return t('knock speaks English now.', '이제 knock이 한국어로 말합니다.')
 }
 
@@ -1566,6 +1577,8 @@ export const register: Register = on => {
   })
 
   on('prompt.autocomplete', async ($, e, next) => {
+    // The typeahead draws /knock as described in this window's language: catch up first.
+    if (e.text.startsWith('/k')) await loadLang($)
     const found = await next(e)
     const typed = /^\/knock\s+([\s\S]*)$/.exec(e.text.slice(0, e.cursor))
     if (!typed) return found
