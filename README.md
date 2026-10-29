@@ -45,7 +45,7 @@ Already know your way? `/knock bob` knocks on bob at once, and `/knock off` leav
 | `/knock pic paste` | Send the picture you copied (macOS) to the chat or room |
 | `/knock pic <file.png>` | Send a PNG file instead. `/knock pic` alone shows the pictures you got |
 | `/knock off` | Leave the chat or room (or stop looking) and go back to Claude |
-| `/knock star` | Star knock on GitHub with your `gh` account, or open its page without `gh`. knock asks about this once, after a real chat that you end yourself |
+| `/knock star` | Star knock on GitHub with your `gh` account, or open its page without `gh`. knock asks about this once, in a line above the prompt, once a chat has gone back and forth a while |
 
 The older `/knock-room`-style commands still work, out of the typeahead.
 

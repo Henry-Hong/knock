@@ -45,7 +45,7 @@
 | `/knock pic paste` | 복사한 사진을 채팅이나 방에 보내기 (macOS) |
 | `/knock pic <파일.png>` | PNG 파일로 보내기. `/knock pic`만 입력하면 받은 사진을 보여 줍니다 |
 | `/knock off` | 연결을 끊거나 방에서 나와(또는 상대 찾기를 그만두고) Claude로 돌아가기 |
-| `/knock star` | `gh` 계정으로 GitHub에서 knock에 스타 남기기. `gh`가 없으면 GitHub 페이지를 엽니다. 직접 끝낸 대화가 충분히 오갔다면 그 뒤에 한 번만 물어봅니다 |
+| `/knock star` | `gh` 계정으로 GitHub에서 knock에 스타 남기기. `gh`가 없으면 GitHub 페이지를 엽니다. 대화가 충분히 오가면 입력창 위에 한 줄로 한 번만 물어봅니다 |
 
 예전의 `/knock-room` 같은 명령도 그대로 동작하지만, 자동완성 목록에는 나오지 않습니다.
 

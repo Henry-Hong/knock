@@ -23,6 +23,7 @@ const MENU = { plugin: 'knock', key: 'menu' } as const
 const VIEWER = { plugin: 'knock', key: 'viewer' } as const
 const TICK = { plugin: 'knock', key: 'tick' } as const
 const ONLINE = { plugin: 'knock', key: 'online' } as const
+const STAR = { plugin: 'knock', key: 'star' } as const
 
 // What knock says things in: English unless the person picked Korean. Kept for the machine in
 // $.store, so every window follows a change: read when a window starts, before each command, as
@@ -360,7 +361,7 @@ async function endChat($: $) {
       await $.state.set(WARNED, false)
     }
   }
-  await $.state.set(CHAT, null)
+  await Promise.all([$.state.set(CHAT, null), $.state.set(STAR, null)])
   await showStatus($, null)
   // A 📨 turn on its way (submitted or started, not yet answering) still shows what came in, as
   // when a peer says something and leaves at once. Its prompt stays pending, or the model
@@ -391,6 +392,7 @@ async function take($: $, events: KnockEvent[]) {
       inbox.push({ type: 'message', from: event.from, text, at: event.at, group: event.group })
     } else await onEvent($, event)
   }
+  if (events.some(event => event.type === 'message')) void offerStar($).catch(err => dbg($, `star offer failed: ${err}`))
 }
 
 async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
@@ -1183,7 +1185,7 @@ async function showPicture($: $, index: number) {
 // The /knock menu: a dialog pane that walks through knocking, the lobby, rooms and settings.
 const MENU_PANE = 'knock'
 
-async function openMenu($: $, step: MenuStep = 'home', extra: Partial<Menu> = {}): Promise<string> {
+async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
   const { value: me } = await $.state.get(ME)
   const [mine, knocks] = me ? await Promise.all([api($, 'GET', '/me'), api($, 'GET', '/knocks')]) : [null, null]
   const recent = await recentOf($)
@@ -1199,18 +1201,16 @@ async function openMenu($: $, step: MenuStep = 'home', extra: Partial<Menu> = {}
     today: typeof knocks?.data?.today === 'number' ? knocks.data.today : undefined,
     last: last && ago < LAST_MS ? { name: last.name, minutes: Math.floor(ago / 60_000), isRandom: last.isRandom } : undefined,
     ...recent,
-    ...extra,
   })
   const opened = await showMenu($)
   if (opened.isPlaced) return ''
-  if (me && step === 'star') return t(`⭐ Enjoyed knock? Star it on GitHub: /knock star`, `⭐ knock 괜찮았나요? GitHub 스타 남기기: /knock star`)
   return me ? overview($, me) : noNameText(await accountsOf($, await serverOf($)))
 }
 
 // Where Esc and Back lead from a step: home, or the step it was entered from. None before a name
-// is picked, nor from home or the star question: there Esc closes the menu.
+// is picked, nor from home: there Esc closes the menu.
 function parentOf(step: MenuStep, hasName: boolean): MenuStep | null {
-  if (!hasName || step === 'home' || step === 'star') return null
+  if (!hasName || step === 'home') return null
   if (step === 'name' || step === 'color' || step === 'lang') return 'me'
   return 'home'
 }
@@ -1231,7 +1231,7 @@ async function goto($: $, step: MenuStep, note?: string) {
 async function focusStep($: $, step: MenuStep) {
   const { value: menu } = await $.state.get(MENU)
   const key =
-    step === 'name' || step === 'friend' || step === 'room' || step === 'star'
+    step === 'name' || step === 'friend' || step === 'room'
       ? step
       : step === 'lang'
         ? 'en'
@@ -1589,13 +1589,8 @@ async function room($: $, args: string): Promise<string> {
 async function leave($: $): Promise<string> {
   const { value: chat } = await $.state.get(CHAT)
   if (!chat) return t('Not connected to anyone.', '연결된 사람이 없습니다.')
-  // A chat that went both ways a while, ended by the person: the moment to ask for a star.
-  const { value: me } = await $.state.get(ME)
-  const saidBy = (isMine: boolean) => recent.filter(line => line.from !== 'claude' && (line.from === me) === isMine).length
-  const isTalked = saidBy(true) >= STAR_AFTER && saidBy(false) >= STAR_AFTER
   await endChat($)
   await api($, 'POST', '/leave', { window: await $.session.id() }).catch(() => undefined)
-  if (isTalked) $.clock.after(0, () => void askStar($).catch(err => dbg($, `star ask failed: ${err}`)))
   if (chat.group) return t(`Left room '${chat.group}'. Back to Claude.`, `'${chat.group}' 방에서 나왔습니다. 다시 Claude와 대화합니다.`)
   if (!chat.peer) return t('Stopped looking.', '상대 찾기를 그만두었습니다.')
   if (!chat.isConnected) return t(`Stopped waiting for ${chat.peer}.`, `${chat.peer} 님 기다리기를 그만두었습니다.`)
@@ -1605,8 +1600,11 @@ async function leave($: $): Promise<string> {
   )
 }
 
-// The lines each side says in a chat before knock asks, once per computer, for a GitHub star.
-const STAR_AFTER = 3
+// The lines each side says in a chat before knock asks, once per computer, for a GitHub star, and
+// how long the band above the prompt asks.
+const STAR_AFTER = 5
+const STAR_BAND_MS = 5 * 60_000
+let isStarOffered = false // this window asked, or found it asked already
 
 // Whether this computer's gh has starred knock: 0 yes, 1 no, else gh is missing or signed out.
 const starredOf = ($: $) =>
@@ -1615,22 +1613,30 @@ const starredOf = ($: $) =>
     () => -1,
   )
 
-// Asks for a star in the menu pane, once: never again after, whatever the answer, nor when gh says
-// it is there already.
-async function askStar($: $) {
+// Once a chat has gone both ways a while, the band above the prompt asks for a star: once per
+// computer, and not when gh says it is there already. Nothing takes the keyboard mid-chat, where a
+// key meant for the chat could answer: /knock star is the yes.
+async function offerStar($: $) {
+  if (isStarOffered) return
+  const { value: chat } = await $.state.get(CHAT)
+  const { value: me } = await $.state.get(ME)
+  const saidBy = (isMine: boolean) => recent.filter(line => line.from !== 'claude' && (line.from === me) === isMine).length
+  if (!chat?.isConnected || saidBy(true) < STAR_AFTER || saidBy(false) < STAR_AFTER || isStarOffered) return
+  isStarOffered = true
   if (await $.store.get('starAsked')) return
   await $.store.set('starAsked', true)
   const starred = await starredOf($)
   if (starred === 0) return
-  const shown = await openMenu($, 'star', { canStar: starred === 1 })
-  if (shown) return notice($, shown)
-  await focusStep($, 'star')
+  const until = (await $.clock.now()) + STAR_BAND_MS
+  await $.state.set(STAR, { until, canStar: starred === 1 })
+  $.clock.after(STAR_BAND_MS, () => void update($, STAR, band => (band?.until === until ? null : (band ?? null))))
 }
 
-// `/knock star`, or yes to the question: stars knock with the person's own GitHub account through gh,
+// `/knock star`, the yes to the band: stars knock with the person's own GitHub account through gh,
 // or, with gh missing or signed out, opens its page to star there.
 async function star($: $): Promise<string> {
   await $.store.set('starAsked', true)
+  await $.state.set(STAR, null)
   const url = `https://github.com/${REPO}`
   const r = await $.process.run(['gh', 'api', '--method', 'PUT', `/user/starred/${REPO}`], { timeoutMs: 15_000 }).catch(() => null)
   if (r?.exitCode === 0) return t(`⭐ Starred ${REPO} on GitHub. Thank you!`, `⭐ GitHub에서 ${REPO}에 스타를 남겼습니다. 고맙습니다!`)
@@ -1966,23 +1972,6 @@ export const register: Register = on => {
         keysHint,
       )
     }
-    // Asked once, after a chat: a yes stars knock through gh, or opens its page without gh.
-    if (menu.step === 'star') {
-      return list(
-        [
-          {
-            key: 'star',
-            hotkey: '1',
-            label: menu.canStar ? t('Star it', '스타 남기기') : t('Open the GitHub page', 'GitHub 페이지 열기'),
-            hint: menu.canStar ? t('Enter stars it with your gh account', 'Enter로 gh 계정에서 스타') : t('Enter opens it in your browser', 'Enter로 브라우저에서 열기'),
-            run: () => void act($, () => star($)),
-          },
-          { key: 'no', hotkey: '2', label: t('No thanks', '괜찮습니다'), hint: t('Enter closes', 'Enter로 닫기'), run: () => void $.ui.close({ id: MENU_PANE }).catch(() => undefined) },
-        ],
-        <Text>{t(`⭐ Enjoyed knock? A star on GitHub (${REPO}) helps others find it.`, `⭐ knock 괜찮았나요? GitHub(${REPO})에 스타를 남기면 다른 사람들이 찾기 쉬워집니다.`)}</Text>,
-        `${t('Asked just this once', '이번 한 번만 묻습니다')} · ${escSays}`,
-      )
-    }
 
     // Home. First, whoever this window chatted with last, unless in a chat now: connected at once if
     // they wait for it to come back, else knocked on again. Then who knocked, as one row: one name
@@ -2049,6 +2038,26 @@ export const register: Register = on => {
         <Text dimColor>
           {'  '}
           {[crowd, t('Stop: /knock off', '그만 찾기: /knock off')].filter(Boolean).join(' · ')}
+        </Text>
+      </Box>
+    )
+  })
+
+  // Mid-chat, once per computer: a band above the prompt asking for a GitHub star.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const { value: band } = await $.state.get(STAR)
+    const { value: chat } = await $.state.get(CHAT)
+    if (e.props.hasSurvey || !band || !chat?.isConnected) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text>⭐ {t('Enjoying knock? A star on GitHub helps others find it.', 'knock 재밌나요? GitHub 스타를 남기면 다른 사람들이 knock을 찾기 쉬워집니다.')}</Text>
+        <Text dimColor>
+          {'  '}
+          {[
+            band.canStar ? t('/knock star stars it with your gh account', '/knock star 하면 gh 계정으로 바로 남깁니다') : t('/knock star opens its GitHub page', '/knock star 하면 GitHub 페이지를 엽니다'),
+            t('asked just this once', '이번 한 번만 묻습니다'),
+          ].join(' · ')}
         </Text>
       </Box>
     )
@@ -2189,6 +2198,7 @@ export const register: Register = on => {
     }
     const { value: me } = await $.state.get(ME)
     remember(me ?? 'me', e.text)
+    void offerStar($).catch(err => dbg($, `star offer failed: ${err}`))
     pendingTurns.push(e.text)
     const submitted = await next(e)
     // Typed over a chat turn: end that turn, or the engine slips this message into it as a
