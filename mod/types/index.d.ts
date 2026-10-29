@@ -29,7 +29,7 @@ export type KnockEvent =
 
 // The /knock menu pane: the step it shows, what it read when it opened (the name's color, who
 // knocked, recent friends and rooms), and a line to say after an action in it.
-export type MenuStep = 'lang' | 'name' | 'home' | 'friend' | 'room' | 'me' | 'color'
+export type MenuStep = 'lang' | 'name' | 'home' | 'friend' | 'room' | 'me' | 'color' | 'star'
 export type Menu = {
   step: MenuStep
   color: string | null
@@ -48,6 +48,8 @@ export type Menu = {
   today?: number
   // Who this window chatted with last, in the past hour, and how many minutes ago it ended.
   last?: { name: string; minutes: number; isRandom: boolean }
+  // The star step: gh is signed in, so a yes stars knock at once rather than opening its page.
+  canStar?: boolean
 }
 
 declare module 'claude-code' {

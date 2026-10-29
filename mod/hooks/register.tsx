@@ -8,6 +8,7 @@ type Reply = { status: number; data: Record<string, unknown> | null }
 type Message = Extract<KnockEvent, { type: 'message' }>
 
 const DEFAULT_SERVER = 'https://knock.everwish.workers.dev'
+const REPO = 'Henry-Hong/knock'
 // As the server checks them.
 const NAME = /^[a-z0-9][a-z0-9_-]{1,19}$/
 const ROOM = /^[^\s\p{Cc}]{1,32}$/u
@@ -668,6 +669,7 @@ const SUBCOMMANDS = {
   off: () => t('End the chat', '대화 끝내기'),
   pic: () =>
     t('Pictures: /knock pic paste sends the copied one, /knock pic <file.png> a file; alone, see them', '사진: /knock pic paste 복사한 사진 보내기, /knock pic <파일.png> 파일 보내기, 그냥 입력하면 받은 사진 보기'),
+  star: () => t('Star knock on GitHub', 'GitHub에서 knock에 스타 남기기'),
 } as const
 const isSubcommand = (word: string): word is keyof typeof SUBCOMMANDS => Object.hasOwn(SUBCOMMANDS, word)
 
@@ -1181,7 +1183,7 @@ async function showPicture($: $, index: number) {
 // The /knock menu: a dialog pane that walks through knocking, the lobby, rooms and settings.
 const MENU_PANE = 'knock'
 
-async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
+async function openMenu($: $, step: MenuStep = 'home', extra: Partial<Menu> = {}): Promise<string> {
   const { value: me } = await $.state.get(ME)
   const [mine, knocks] = me ? await Promise.all([api($, 'GET', '/me'), api($, 'GET', '/knocks')]) : [null, null]
   const recent = await recentOf($)
@@ -1197,16 +1199,18 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
     today: typeof knocks?.data?.today === 'number' ? knocks.data.today : undefined,
     last: last && ago < LAST_MS ? { name: last.name, minutes: Math.floor(ago / 60_000), isRandom: last.isRandom } : undefined,
     ...recent,
+    ...extra,
   })
   const opened = await showMenu($)
   if (opened.isPlaced) return ''
+  if (me && step === 'star') return t(`⭐ Enjoyed knock? Star it on GitHub: /knock star`, `⭐ knock 괜찮았나요? GitHub 스타 남기기: /knock star`)
   return me ? overview($, me) : noNameText(await accountsOf($, await serverOf($)))
 }
 
 // Where Esc and Back lead from a step: home, or the step it was entered from. None before a name
-// is picked, nor from home: there Esc closes the menu.
+// is picked, nor from home or the star question: there Esc closes the menu.
 function parentOf(step: MenuStep, hasName: boolean): MenuStep | null {
-  if (!hasName || step === 'home') return null
+  if (!hasName || step === 'home' || step === 'star') return null
   if (step === 'name' || step === 'color' || step === 'lang') return 'me'
   return 'home'
 }
@@ -1227,7 +1231,7 @@ async function goto($: $, step: MenuStep, note?: string) {
 async function focusStep($: $, step: MenuStep) {
   const { value: menu } = await $.state.get(MENU)
   const key =
-    step === 'name' || step === 'friend' || step === 'room'
+    step === 'name' || step === 'friend' || step === 'room' || step === 'star'
       ? step
       : step === 'lang'
         ? 'en'
@@ -1394,6 +1398,8 @@ async function knockCommand($: $, args: string): Promise<string> {
       return leave($)
     case 'pic':
       return picture($, tail)
+    case 'star':
+      return star($)
     default:
       return knock($, args)
   }
@@ -1583,8 +1589,13 @@ async function room($: $, args: string): Promise<string> {
 async function leave($: $): Promise<string> {
   const { value: chat } = await $.state.get(CHAT)
   if (!chat) return t('Not connected to anyone.', '연결된 사람이 없습니다.')
+  // A chat that went both ways a while, ended by the person: the moment to ask for a star.
+  const { value: me } = await $.state.get(ME)
+  const saidBy = (isMine: boolean) => recent.filter(line => line.from !== 'claude' && (line.from === me) === isMine).length
+  const isTalked = saidBy(true) >= STAR_AFTER && saidBy(false) >= STAR_AFTER
   await endChat($)
   await api($, 'POST', '/leave', { window: await $.session.id() }).catch(() => undefined)
+  if (isTalked) $.clock.after(0, () => void askStar($).catch(err => dbg($, `star ask failed: ${err}`)))
   if (chat.group) return t(`Left room '${chat.group}'. Back to Claude.`, `'${chat.group}' 방에서 나왔습니다. 다시 Claude와 대화합니다.`)
   if (!chat.peer) return t('Stopped looking.', '상대 찾기를 그만두었습니다.')
   if (!chat.isConnected) return t(`Stopped waiting for ${chat.peer}.`, `${chat.peer} 님 기다리기를 그만두었습니다.`)
@@ -1592,6 +1603,41 @@ async function leave($: $): Promise<string> {
     t(`Disconnected from ${chat.peer}. Back to Claude.`, `${chat.peer} 님과의 연결을 끊었습니다. 다시 Claude와 대화합니다.`),
     `${t('By mistake? Knock again', '실수였다면 다시 노크')}: /knock ${chat.peer}`,
   )
+}
+
+// The lines each side says in a chat before knock asks, once per computer, for a GitHub star.
+const STAR_AFTER = 3
+
+// Whether this computer's gh has starred knock: 0 yes, 1 no, else gh is missing or signed out.
+const starredOf = ($: $) =>
+  $.process.run(['gh', 'api', `/user/starred/${REPO}`], { timeoutMs: 10_000 }).then(
+    r => r.exitCode,
+    () => -1,
+  )
+
+// Asks for a star in the menu pane, once: never again after, whatever the answer, nor when gh says
+// it is there already.
+async function askStar($: $) {
+  if (await $.store.get('starAsked')) return
+  await $.store.set('starAsked', true)
+  const starred = await starredOf($)
+  if (starred === 0) return
+  const shown = await openMenu($, 'star', { canStar: starred === 1 })
+  if (shown) return notice($, shown)
+  await focusStep($, 'star')
+}
+
+// `/knock star`, or yes to the question: stars knock with the person's own GitHub account through gh,
+// or, with gh missing or signed out, opens its page to star there.
+async function star($: $): Promise<string> {
+  await $.store.set('starAsked', true)
+  const url = `https://github.com/${REPO}`
+  const r = await $.process.run(['gh', 'api', '--method', 'PUT', `/user/starred/${REPO}`], { timeoutMs: 15_000 }).catch(() => null)
+  if (r?.exitCode === 0) return t(`⭐ Starred ${REPO} on GitHub. Thank you!`, `⭐ GitHub에서 ${REPO}에 스타를 남겼습니다. 고맙습니다!`)
+  const opened = await $.process.run(['open', url]).catch(() => null)
+  return opened?.exitCode === 0
+    ? say(t('⭐ Opened knock on GitHub in your browser: the star is at the top right.', '⭐ 브라우저에서 knock GitHub 페이지를 열었습니다. 스타는 오른쪽 위에 있습니다.'), url)
+    : say(t('⭐ Star knock on its GitHub page:', '⭐ GitHub 페이지에서 스타를 남겨 주세요:'), url)
 }
 
 // A new window, a moment after one closed mid-chat: if that peer waits for it to come back, say so.
@@ -1918,6 +1964,23 @@ export const register: Register = on => {
         ],
         null,
         keysHint,
+      )
+    }
+    // Asked once, after a chat: a yes stars knock through gh, or opens its page without gh.
+    if (menu.step === 'star') {
+      return list(
+        [
+          {
+            key: 'star',
+            hotkey: '1',
+            label: menu.canStar ? t('Star it', '스타 남기기') : t('Open the GitHub page', 'GitHub 페이지 열기'),
+            hint: menu.canStar ? t('Enter stars it with your gh account', 'Enter로 gh 계정에서 스타') : t('Enter opens it in your browser', 'Enter로 브라우저에서 열기'),
+            run: () => void act($, () => star($)),
+          },
+          { key: 'no', hotkey: '2', label: t('No thanks', '괜찮습니다'), hint: t('Enter closes', 'Enter로 닫기'), run: () => void $.ui.close({ id: MENU_PANE }).catch(() => undefined) },
+        ],
+        <Text>{t(`⭐ Enjoyed knock? A star on GitHub (${REPO}) helps others find it.`, `⭐ knock 괜찮았나요? GitHub(${REPO})에 스타를 남기면 다른 사람들이 찾기 쉬워집니다.`)}</Text>,
+        `${t('Asked just this once', '이번 한 번만 묻습니다')} · ${escSays}`,
       )
     }
 
