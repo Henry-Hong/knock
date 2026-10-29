@@ -890,6 +890,15 @@ function base64Of(bytes: Uint8Array) {
 
 // A picture as Raster cells, columns x rows: each cell an upper half block whose foreground is the
 // pixel above and background the one below, so a cell holds two square-ish pixels.
+// Whether this terminal may draw a sharp picture: Claude Code draws them in kitty, Ghostty and
+// iTerm2, and in tmux with passthrough on. A terminal that names itself as anything else cannot,
+// so the viewer offers only the blocks there; one that names nothing gets the benefit of the doubt.
+async function canDrawSharp($: $) {
+  const program = (await $.env.get('TERM_PROGRAM')) ?? ''
+  const term = (await $.env.get('TERM')) ?? ''
+  return !program || ['iTerm.app', 'ghostty', 'kitty', 'tmux'].includes(program) || term.includes('kitty')
+}
+
 function cellsOf(thumb: Thumb, columns: number, rows: number) {
   const words = new DataView(new ArrayBuffer(columns * rows * 12))
   const colorAt = (x: number, y: number) => {
@@ -1106,6 +1115,8 @@ async function focusStep($: $, step: MenuStep) {
             : menu?.knocks.length
               ? 'knocked'
               : 'friend'
+  // A move this plugin makes skips its own ui.focus hook, so the row learns it has the ring here.
+  await update($, MENU, current => (current ? { ...current, focused: key } : null))
   const moved = await $.ui.focus({ requestId: MENU_PANE, key }).catch(() => ({ deny: 'failed' }))
   // The pane lost the keyboard (an Esc handed it to the prompt): take it back, then the ring.
   if (moved.deny) {
@@ -1116,7 +1127,7 @@ async function focusStep($: $, step: MenuStep) {
 
 // Shows another page of a step's choices, the ring on its first.
 async function turnPage($: $, page: number, focusKey: string) {
-  await update($, MENU, menu => (menu ? { ...menu, page } : null))
+  await update($, MENU, menu => (menu ? { ...menu, page, focused: focusKey } : null))
   void $.ui.focus({ requestId: MENU_PANE, key: focusKey }).catch(() => undefined)
 }
 
@@ -1598,11 +1609,11 @@ export const register: Register = on => {
     const escSays = parent ? t('Esc back', 'Esc 뒤로') : t('Esc closes', 'Esc 닫기')
     const goBack = () => void goto($, parent ?? 'home')
     // Under a field a digit is typed into it, so the way back there has no key.
-    const back = (hasKey: boolean): Row => ({ key: 'back', hotkey: hasKey ? '0' : undefined, label: t('← Back', '← 뒤로'), run: goBack })
+    const back = (hasKey: boolean): Row => ({ key: 'back', hotkey: hasKey ? '0' : undefined, label: t('Back', '뒤로'), hint: '', run: goBack })
 
-    // label is the row's text, and content the same text styled, where it has styles. more, drawn dim
-    // in one column after the rows' text, marks a row that opens another step.
-    type Row = { key: string; hotkey?: string; label?: string; content?: typeof header; more?: string; run: () => void }
+    // label is the row's text, and content the same text styled, where it has styles. hint says what
+    // Enter does, drawn dim after the focused row only, in one column for every row ('' for none).
+    type Row = { key: string; hotkey?: string; label: string; content?: typeof header; hint?: string; run: () => void }
     // The step: its lead (a line, or the field), then its rows, a page of them if they do not fit.
     const list = (rows: Row[], lead: typeof header | null, hint: string) => {
       const fixed = lead ? 1 : 0
@@ -1615,23 +1626,30 @@ export const register: Register = on => {
       const shown = rows.slice(page * perPage, (page + 1) * perPage)
       const left = rows.length - (page + 1) * perPage
       const next = (page + 1) % pages
-      const widest = Math.max(0, ...shown.filter(row => row.more).map(row => widthOf(row.label ?? '')))
+      const widest = Math.max(0, ...shown.map(row => widthOf(row.label)))
+      // The hint's column, unless that would push a hint past the pane's edge.
+      const isAligned = widest + 20 <= e.props.bodyColumns
       return (
         <Box flexDirection="column">
           {withHeader && header}
           {lead}
-          {shown.map((row, i) =>
-            row.content || row.more ? (
-              <Button key={row.key} plain hotkey={row.hotkey} autoFocus={!lead && i === 0 ? true : undefined} onPress={row.run}>
-                <Text>
-                  {row.content ?? row.label}
-                  {row.more && <Text dimColor>{' '.repeat(widest - widthOf(row.label ?? '') + 3) + row.more}</Text>}
-                </Text>
-              </Button>
-            ) : (
-              <Button key={row.key} plain hotkey={row.hotkey} autoFocus={!lead && i === 0 ? true : undefined} label={row.label} onPress={row.run} />
-            ),
-          )}
+          {shown.map((row, i) => {
+            const hint = e.props.isFocused && menu.focused === row.key ? (row.hint ?? 'Enter') : ''
+            const gap = isAligned ? widest - widthOf(row.label) + 3 : 2
+            // Every row is drawn the same way, hint or not, so a redraw keeps the ring where it is.
+            return (
+              <Box key={`row-${row.key}`} flexDirection="row">
+                {row.content ? (
+                  <Button key={row.key} plain hotkey={row.hotkey} autoFocus={!lead && i === 0 ? true : undefined} onPress={row.run}>
+                    {row.content}
+                  </Button>
+                ) : (
+                  <Button key={row.key} plain hotkey={row.hotkey} autoFocus={!lead && i === 0 ? true : undefined} label={row.label} onPress={row.run} />
+                )}
+                <Text dimColor>{hint && ' '.repeat(gap) + hint}</Text>
+              </Box>
+            )
+          })}
           {isPaged && (
             <Button
               key="more"
@@ -1645,10 +1663,10 @@ export const register: Register = on => {
         </Box>
       )
     }
-    const keysHint = `${t('Key, or ↑↓ Enter', '키, 또는 ↑↓ Enter')} · ${escSays}`
+    const keysHint = `${t('↑↓ move · a number picks at once', '↑↓ 이동 · 숫자키로 바로 선택')} · ${escSays}`
     const fieldHint = `${t('Enter saves · ↓ to the list', 'Enter 저장 · ↓ 목록으로')} · ${escSays}`
-    const recentRows = (list: string[], run: (value: string) => Promise<string>): Row[] =>
-      list.slice(0, 6).map(one => ({ key: `recent-${one}`, label: `${t('recent', '최근')}: ${one}`, run: () => void act($, () => run(one)) }))
+    const recentRows = (list: string[], verb: string, run: (value: string) => Promise<string>): Row[] =>
+      list.slice(0, 6).map(one => ({ key: `recent-${one}`, label: `${t('recent', '최근')}: ${one}`, hint: verb, run: () => void act($, () => run(one)) }))
 
     if (menu.step === 'lang') {
       return list(
@@ -1682,18 +1700,18 @@ export const register: Register = on => {
       const field = (
         <Input key="friend" label={t("Friend's name", '친구 이름')} placeholder={t('e.g. bob', '예: bob')} submitLabel={t('Knock', '노크')} autoFocus onSubmit={(value: string) => void act($, () => knock($, value))} />
       )
-      return list([...recentRows([...new Set([...menu.knocks, ...menu.friends])], value => knock($, value)), back(false)], field, fieldHint)
+      return list([...recentRows([...new Set([...menu.knocks, ...menu.friends])], t('Enter to knock', 'Enter로 노크'), value => knock($, value)), back(false)], field, fieldHint)
     }
     if (menu.step === 'room') {
       const field = (
         <Input key="room" label={t('Room', '방 이름')} placeholder={t('e.g. lunch-7k2q', '예: 점심팟-7k2q')} submitLabel={t('Join', '들어가기')} autoFocus onSubmit={(value: string) => void act($, () => room($, value))} />
       )
-      return list([...recentRows(menu.rooms, value => room($, value)), back(false)], field, fieldHint)
+      return list([...recentRows(menu.rooms, t('Enter to join', 'Enter로 들어가기'), value => room($, value)), back(false)], field, fieldHint)
     }
     if (menu.step === 'me') {
       const color = colorFor(me, menu.color)
       const colorText = `${colorName(color)}${isColor(menu.color) ? '' : t(' (auto)', ' (자동)')}`
-      const change = t('change ›', '바꾸기 ›')
+      const change = t('Enter to change', 'Enter로 바꾸기')
       return list(
         [
           {
@@ -1707,11 +1725,11 @@ export const register: Register = on => {
                 {` ${colorText}`}
               </Text>
             ),
-            more: change,
+            hint: change,
             run: () => void goto($, 'color'),
           },
-          { key: 'lang', hotkey: '2', label: `${t('Language', '언어')}: ${lang === 'ko' ? '한국어' : 'English'}`, more: change, run: () => void goto($, 'lang') },
-          { key: 'rename', hotkey: '3', label: `${t('Name', '이름')}: ${me}`, more: change, run: () => void goto($, 'name') },
+          { key: 'lang', hotkey: '2', label: `${t('Language', '언어')}: ${lang === 'ko' ? '한국어' : 'English'}`, hint: change, run: () => void goto($, 'lang') },
+          { key: 'rename', hotkey: '3', label: `${t('Name', '이름')}: ${me}`, hint: change, run: () => void goto($, 'name') },
           back(true),
         ],
         null,
@@ -1725,6 +1743,7 @@ export const register: Register = on => {
           ...COLOR_KEYS.map((key, i) => ({
             key: `color-${key}`,
             hotkey: String(i + 1),
+            label: `● ${me} ${colorName(key)}${key === current ? ' ✓' : ''}`,
             content: (
               <Text>
                 <Text color={COLORS[key].hex}>●</Text>
@@ -1752,18 +1771,18 @@ export const register: Register = on => {
         ...(knocked.length === 1
           ? [{ key: 'knocked', label: `🚪 ${t(`Connect with ${knocked[0]} (knocked on you)`, `${knocked[0]} 님과 연결하기 (나에게 노크함)`)}`, run: () => void act($, () => knock($, knocked[0]!)) }]
           : knocked.length > 1
-            ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you`, `${namesOf(knocked)} 님이 노크함`)}`, more: '›', run: () => void goto($, 'friend') }]
+            ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you`, `${namesOf(knocked)} 님이 노크함`)}`, hint: t('Enter to pick', 'Enter로 고르기'), run: () => void goto($, 'friend') }]
             : []),
-        { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), more: '›', run: () => void goto($, 'friend') },
+        { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
         { key: 'random', label: t('Meet someone at random', '아무나 만나기') + waitingOf(menu), run: () => void act($, () => random($, '')) },
-        { key: 'room', label: t('Join a room', '방 들어가기'), more: '›', run: () => void goto($, 'room') },
+        { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
         ...(chat?.isConnected
           ? [{ key: 'paste', label: t('Send the picture you copied', '복사한 사진 보내기'), run: () => void act($, () => pastePicture($)) }]
           : []),
         ...(pictures.length
           ? [{ key: 'pictures', label: t(`See the pictures (${pictures.length})`, `받은 사진 보기 (${pictures.length})`), run: () => void act($, () => openViewer($)) }]
           : []),
-        { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), more: '›', run: () => void goto($, 'me') },
+        { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), run: () => void goto($, 'me') },
         ...(chat
           ? [{
               key: 'off',
@@ -1815,7 +1834,8 @@ export const register: Register = on => {
       return <Text dimColor>{t('No picture to show here.', '여기서 보여 줄 사진이 없습니다.')}</Text>
     }
     const { Image, Raster } = table
-    const isSharp = !!viewer?.isSharp
+    const canSharp = await canDrawSharp($)
+    const isSharp = canSharp && !!viewer?.isSharp
     if (!isSharp && shown.thumb === undefined) shown.thumb = thumbOf(shown.png, 240)
     const older = index + 1 < pictures.length
     const newer = index > 0
@@ -1855,15 +1875,24 @@ export const register: Register = on => {
         {older && <Button key="older" plain hotkey="o" autoFocus label={t('older picture', '이전 사진')} onPress={() => void showPicture($, index + 1)} />}
         {newer && <Button key="newer" plain hotkey="n" autoFocus={older ? undefined : true} label={t('newer picture', '다음 사진')} onPress={() => void showPicture($, index - 1)} />}
         {/* Never focused first: an Enter meant for something else would switch the view. */}
-        <Button
-          key="sharp"
-          plain
-          hotkey="g"
-          label={isSharp ? t('block view (any terminal)', '블록 보기 (모든 터미널)') : t('sharp view (iTerm2, Ghostty, kitty)', '선명하게 보기 (iTerm2, Ghostty, kitty)')}
-          onPress={() => void update($, VIEWER, current => (current ? { ...current, isSharp: !current.isSharp } : null))}
-        />
+        {canSharp && (
+          <Button
+            key="sharp"
+            plain
+            hotkey="g"
+            label={isSharp ? t('block view', '블록 보기') : t('sharp view', '선명하게 보기')}
+            onPress={() => void update($, VIEWER, current => (current ? { ...current, isSharp: !current.isSharp } : null))}
+          />
+        )}
       </Box>
     )
+  })
+
+  // Where the ring lands in the menu, so that row alone says what Enter does.
+  on('ui.focus', { requestId: MENU_PANE }, async ($, e, next) => {
+    const moved = await next(e)
+    if (!moved.deny) await update($, MENU, menu => (menu ? { ...menu, focused: e.element } : null))
+    return moved
   })
 
   on('ui.close', { id: MENU_PANE }, async ($, e, next) => {

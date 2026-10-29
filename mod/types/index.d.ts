@@ -37,6 +37,8 @@ export type Menu = {
   note?: string
   // Which page of the step's choices shows, when the pane is too short for them all.
   page?: number
+  // The key of the element the focus ring is on, whose row says what Enter does.
+  focused?: string
   // When it opened: how many others were on knock, how many of them waited in the open lobby,
   // and how many used knock in the last 24 hours.
   others?: number

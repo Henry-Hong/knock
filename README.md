@@ -155,7 +155,7 @@ In a chat or a room, copy a picture and type `/knock pic paste`. ⌘⌃⇧4 capt
 ```
 
 - `/knock pic` opens a viewer with the latest pictures, newest first: `o` older, `n` newer, `Esc` closes.
-- The viewer draws the picture in colored blocks, which works in any terminal. Press `g` for the sharp picture where the terminal can draw one (iTerm2, Ghostty, kitty; up to 2 MB).
+- The viewer draws the picture in colored blocks, which works in any terminal. Press `g` for the sharp picture where the terminal can draw one (iTerm2 3.5 and later, Ghostty, kitty; up to 2 MB). Other terminals, Orca or Apple's Terminal among them, don't get the `g`.
 - A file must be a PNG (a screenshot is one), up to 4 MB; a pasted picture is turned into a PNG and shrunk to fit. 6 a minute. The server passes pictures on and keeps none.
 - `/knock` lists **Send the picture you copied** while you're in a chat, and **See the pictures** once you have some.
 - A picture from someone met at random says so: open it only if you trust them.
