@@ -113,6 +113,8 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 
 - `/knock random` alone is the open lobby, for everyone. `/knock random <code>` is a lobby of its own, so only people who type the same code meet. Use one for a team or a community.
 - The person who has waited longest gets matched first.
+- While you wait, a line above the prompt spins and shows how long you've waited and how many people are on knock right now.
+- `/knock` shows, next to **Meet someone at random**, how many are waiting in the open lobby. If someone is, you connect at once.
 - `/knock next` moves on. You won't get the person you just left again right away.
 - `/knock block` blocks the person you're chatting with and ends the chat. You never meet them at random again, and their knocks don't notify you. If you knock on each other on purpose, you still connect.
 
@@ -193,6 +195,7 @@ The default server is `https://knock.everwish.workers.dev`. It runs on Cloudflar
 
 - Accounts store only a name and a hash of its token. The token itself stays on your computer.
 - Messages are relayed, never stored.
+- `GET /stats` tells how many people are on knock right now (in a chat, knocking, waiting in a lobby or in a room): counts only, no names.
 - Rate limits, per minute: 5 sign-ups per IP, 60 knocks or messages per person, 300 requests per IP.
 
 To run your own server, start Claude Code with `KNOCK_SERVER` pointing at it:

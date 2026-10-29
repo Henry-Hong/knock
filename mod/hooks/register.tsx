@@ -1,7 +1,7 @@
 import { update } from 'claude-code'
 import type { EngineInterface, PromptAutocompleteSuggestion, Register } from 'claude-code'
 
-import type { Chat, KnockEvent, MenuStep } from '../types'
+import type { Chat, KnockEvent, Menu, MenuStep } from '../types'
 
 type $ = EngineInterface
 type Reply = { status: number; data: Record<string, unknown> | null }
@@ -20,6 +20,8 @@ const STRANGERS = { plugin: 'knock', key: 'strangers' } as const
 const WARNED = { plugin: 'knock', key: 'isWarned' } as const
 const MENU = { plugin: 'knock', key: 'menu' } as const
 const VIEWER = { plugin: 'knock', key: 'viewer' } as const
+const TICK = { plugin: 'knock', key: 'tick' } as const
+const ONLINE = { plugin: 'knock', key: 'online' } as const
 
 // What knock says things in: English unless the person picked Korean. Kept for the machine in
 // $.store, read when a window starts and before each command, so every window follows a change.
@@ -80,8 +82,12 @@ async function api($: $, method: 'GET' | 'POST', path: string, body?: object): P
   return { status: res.status, data }
 }
 
-const poll = async ($: $, holdMs: number) =>
-  api($, 'GET', `/poll?window=${encodeURIComponent(await $.session.id())}&hold=${holdMs}`)
+// Each answer also says how many are on knock, which the lobby band shows.
+async function poll($: $, holdMs: number) {
+  const r = await api($, 'GET', `/poll?window=${encodeURIComponent(await $.session.id())}&hold=${holdMs}`)
+  if (typeof r.data?.online === 'number') await $.state.set(ONLINE, r.data.online)
+  return r
+}
 
 // What went wrong, in the person's words; `known` says what a status means for this call.
 const errorOf = (r: Reply, known: Partial<Record<number, string>> = {}) =>
@@ -110,6 +116,13 @@ const say = (head: string, ...details: (string | false | undefined)[]) =>
 const notice = ($: $, text: string) => $.ui.log(text.replace(/\n(• )?/g, ' · '))
 
 const lobbyOf = (room = '') => (room ? t(`the '${room}' lobby`, `'${room}' 대기실`) : t('the open lobby', '전체 대기실'))
+// After the menu's random row: who waits in the open lobby now, else how many are on knock.
+const crowdOf = (menu: Menu) =>
+  menu.waiting
+    ? ` · ${t(`${menu.waiting} waiting now`, `지금 ${menu.waiting}명 기다리는 중`)}`
+    : menu.online
+      ? ` · ${t(`${menu.online} on knock now`, `지금 ${menu.online}명 접속 중`)}`
+      : ''
 const countOf = (chat: Chat) => `${chat.members?.length ?? 1}/${GROUP_MAX}`
 // Up to three names, then how many more.
 const namesOf = (names: string[]) =>
@@ -117,8 +130,29 @@ const namesOf = (names: string[]) =>
     ? `${names.slice(0, 3).join(', ')} ${t(`and ${names.length - 3} more`, `외 ${names.length - 3}명`)}`
     : names.join(', ')
 
+// Looking in a lobby, with no one met yet.
+const isLooking = (chat: Chat | null | undefined): chat is Chat => !!chat?.isRandom && !chat.peer
+
+// The band's spinner frames, a frame per tick.
+const FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+const TICK_MS = 120
+let ticker = 0 // bumped to stop the band's ticking
+
+// Ticks the clock the lobby band draws from, while this window looks in a lobby.
+function tickBand($: $) {
+  const id = ++ticker
+  const tick = async () => {
+    if (id !== ticker || !isLooking((await $.state.get(CHAT)).value)) return
+    await $.state.set(TICK, await $.clock.now())
+    $.clock.after(TICK_MS, () => void tick())
+  }
+  void tick()
+}
+
 async function showStatus($: $, chat: Chat | null) {
   const { value: me } = await $.state.get(ME)
+  if (isLooking(chat)) tickBand($)
+  else ticker++
   $.ui.status(
     !chat
       ? undefined
@@ -1014,6 +1048,8 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
     step: me ? step : isLangPicked ? 'name' : 'lang',
     color: mine?.status === 200 ? ((mine.data?.color as string | null) ?? null) : null,
     knocks: knocks?.status === 200 ? ((knocks.data?.from ?? []) as string[]) : [],
+    online: typeof knocks?.data?.online === 'number' ? knocks.data.online : undefined,
+    waiting: typeof knocks?.data?.waiting === 'number' ? knocks.data.waiting : undefined,
     ...recent,
   })
   const opened = await showMenu($)
@@ -1243,13 +1279,15 @@ async function knock($: $, args: string): Promise<string> {
 
 // Joins the lobby `room`, leaving any chat this window is in: connected at once if someone waits
 // there, otherwise waiting until someone comes.
-async function seek($: $, room: string): Promise<string> {
+// `since` carries the time it began looking over a /clear.
+async function seek($: $, room: string, since?: number): Promise<string> {
   const { value: before } = await $.state.get(CHAT)
   const r = await api($, 'POST', '/random', { window: await $.session.id(), room })
   if (r.status !== 200) return errorOf(r, { 400: ROOM_RULE() })
   if (before) await endChat($)
   const peer = r.data?.state === 'connected' ? String(r.data.peer) : null
-  const chat = { peer, isConnected: !!peer, isRandom: true, room }
+  if (typeof r.data?.online === 'number') await $.state.set(ONLINE, r.data.online)
+  const chat = { peer, isConnected: !!peer, isRandom: true, room, since: since ?? (await $.clock.now()) }
   await $.state.set(CHAT, chat)
   await showStatus($, chat)
   startLoop($)
@@ -1311,7 +1349,7 @@ async function carryOver($: $, oldId: string, me: string | null | undefined, cha
   if (me) await $.state.set(ME, me)
   if (!me || !chat) return
   if (chat.isRandom && !chat.peer) {
-    notice($, await seek($, chat.room ?? ''))
+    notice($, await seek($, chat.room ?? '', chat.since))
     return
   }
   const window = await $.session.id()
@@ -1687,7 +1725,7 @@ export const register: Register = on => {
             ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you…`, `${namesOf(knocked)} 님이 노크함…`)}`, run: () => void goto($, 'friend') }]
             : []),
         { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
-        { key: 'random', label: t('Meet someone at random', '아무나 만나기'), run: () => void act($, () => random($, '')) },
+        { key: 'random', label: t('Meet someone at random', '아무나 만나기') + crowdOf(menu), run: () => void act($, () => random($, '')) },
         { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
         ...(chat?.isConnected
           ? [{ key: 'paste', label: t('Send the picture you copied', '복사한 사진 보내기'), run: () => void act($, () => pastePicture($)) }]
@@ -1706,6 +1744,36 @@ export const register: Register = on => {
       ].map((row, i) => ({ ...row, hotkey: String(i + 1) })),
       null,
       keysHint,
+    )
+  })
+
+  // While looking in a lobby: a band above the prompt that spins, counts the wait, and says how
+  // many are on knock now.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const { value: chat } = await $.state.get(CHAT)
+    if (e.props.hasSurvey || !isLooking(chat)) return next(e)
+    const { value: now = 0 } = await $.state.get(TICK)
+    const { value: online } = await $.state.get(ONLINE)
+    const { Box, Text } = $.ui.resolve(e)
+    const waited = Math.max(0, Math.floor((now - (chat.since ?? now)) / 1000))
+    const clock = `${Math.floor(waited / 60)}:${String(waited % 60).padStart(2, '0')}`
+    const crowd =
+      online == null
+        ? null
+        : online <= 1
+          ? t('On knock now: just you', '지금 knock 접속: 나 혼자')
+          : t(`${online} on knock now`, `지금 knock 접속 ${online}명`)
+    return (
+      <Box flexDirection="column">
+        <Text>
+          <Text color={COLORS.sky.hex}>{FRAMES[Math.floor(now / TICK_MS) % FRAMES.length]}</Text>{' '}
+          🎲 {t(`Looking in ${lobbyOf(chat.room)}`, `${lobbyOf(chat.room)}에서 상대 찾는 중`)} <Text dimColor>{clock}</Text>
+        </Text>
+        <Text dimColor>
+          {'  '}
+          {[crowd, t('Stop: /knock off', '그만 찾기: /knock off')].filter(Boolean).join(' · ')}
+        </Text>
+      </Box>
     )
   })
 

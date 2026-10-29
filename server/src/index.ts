@@ -33,6 +33,8 @@ app.use('*', perIp)
 
 app.get('/', c => c.text('knock relay'))
 
+app.get('/stats', async c => c.json(await hub(c).stats()))
+
 app.post('/register', perSignup, async c => {
   const { name } = await body(c)
   return reply(c, await hub(c).register(str(name)))

@@ -1,12 +1,13 @@
 // Who this window chats with; isConnected is false while it waits, for a knock back or, with no
 // peer yet, in a random lobby. room is that lobby: '' for the open one, else a group's code.
 // In a group room (group) there is no peer: members is who is in it now, the person included,
-// and seen everyone else who was there with them.
+// and seen everyone else who was there with them. since is when it started looking in the lobby.
 export type Chat = {
   peer: string | null
   isConnected: boolean
   isRandom?: boolean
   room?: string
+  since?: number
   group?: string
   members?: string[]
   seen?: string[]
@@ -36,6 +37,9 @@ export type Menu = {
   note?: string
   // Which page of the step's choices shows, when the pane is too short for them all.
   page?: number
+  // How many were on knock when it opened, and how many of them wait in the open lobby.
+  online?: number
+  waiting?: number
 }
 
 declare module 'claude-code' {
@@ -51,6 +55,9 @@ declare module 'claude-code' {
       menu: Menu | null
       // The picture viewer: which picture shows (0 the newest), and a count bumped as pictures come.
       viewer: { index: number; seq: number; isSharp?: boolean } | null
+      // While looking in a lobby: the clock, ticking to animate the band, and how many are on knock.
+      tick: number
+      online: number | null
     }
   }
 }

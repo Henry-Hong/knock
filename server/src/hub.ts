@@ -133,7 +133,7 @@ export class Hub extends DurableObject<Env> {
     token: string,
     window: string,
     room: string,
-  ): Promise<Result<{ state: 'connected'; peer: string } | { state: 'waiting' }>> {
+  ): Promise<Result<{ state: 'connected'; peer: string } | { state: 'waiting'; online: number }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     if (!ROOM.test(room)) return fail(400, 'room must be up to 32 characters, with no spaces')
@@ -159,7 +159,7 @@ export class Hub extends DurableObject<Env> {
     }
     live.seeking = room
     live.seekingAt = Date.now()
-    return ok({ state: 'waiting' })
+    return ok({ state: 'waiting', online: this.live.size })
   }
 
   // Joins the group room `group`, leaving any chat this window is in, unless the room is full.
@@ -217,14 +217,31 @@ export class Hub extends DurableObject<Env> {
     return ok({ blocked: name })
   }
 
-  async knocks(token: string): Promise<Result<{ from: string[] }>> {
+  // Who knocked on this user, with how many are on knock now and how many of them, not blocked
+  // either way, wait in the open lobby.
+  async knocks(token: string): Promise<Result<{ from: string[]; online: number; waiting: number }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     this.sweep()
     const from = [...this.live]
       .filter(([name, l]) => l.target === me && !l.peer && !this.hasBlocked(me, name))
       .map(([name]) => name)
-    return ok({ from })
+    const blocked = this.blocked(me)
+    const waiting = [...this.live].filter(([name, l]) => name !== me && l.seeking === '' && !l.peer && !blocked.has(name))
+    return ok({ from, online: this.live.size, waiting: waiting.length })
+  }
+
+  // How many are on knock now: each in a chat, knocking, looking for a match or in a room. No names.
+  async stats(): Promise<{ online: number; chatting: number; looking: number; inRooms: number; rooms: number }> {
+    this.sweep()
+    const all = [...this.live.values()]
+    return {
+      online: all.length,
+      chatting: all.filter(l => l.peer).length,
+      looking: all.filter(l => l.seeking !== null && !l.peer).length,
+      inRooms: all.filter(l => l.group).length,
+      rooms: this.groups.size,
+    }
   }
 
   // Hands a picture on as `send` hands text: to the peer, or the rest of the room. Nothing keeps it.
@@ -286,16 +303,17 @@ export class Hub extends DurableObject<Env> {
     return ok({})
   }
 
-  async poll(token: string, window: string, holdMs = POLL_HOLD_MS): Promise<Result<{ events: KnockEvent[] }>> {
+  // A poll's answer also says how many are on knock, for a window waiting in a lobby to show.
+  async poll(token: string, window: string, holdMs = POLL_HOLD_MS): Promise<Result<{ events: KnockEvent[]; online: number }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     this.sweep()
     const live = this.live.get(me)
-    if (!live) return ok({ events: [{ type: 'ended' }] })
-    if (live.window !== window) return ok({ events: [{ type: 'replaced' }] })
+    if (!live) return ok({ events: [{ type: 'ended' }], online: this.live.size })
+    if (live.window !== window) return ok({ events: [{ type: 'replaced' }], online: this.live.size })
 
     live.seenAt = Date.now()
-    if (live.queue.length) return ok({ events: live.queue.splice(0) })
+    if (live.queue.length) return ok({ events: live.queue.splice(0), online: this.live.size })
 
     live.waiter?.([])
     const events = await new Promise<KnockEvent[]>(resolve => {
@@ -308,7 +326,7 @@ export class Hub extends DurableObject<Env> {
       live.waiter = settle
     })
     live.seenAt = Date.now()
-    return ok({ events })
+    return ok({ events, online: this.live.size })
   }
 
   private exists(name: string): boolean {
