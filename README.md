@@ -53,6 +53,7 @@ The older `/knock-room`-style commands still work, out of the typeahead.
 - **A knock only notifies your friend if they have a knock window open.** knock tells you when it didn't, so you can ping them yourself.
 - **The spinner keeps running while you're connected.** It's waiting for your friend's reply.
 - **The chat stays in that window's Claude history.** Chat in a fresh window, not the one you're working in.
+- **Closed the window by mistake?** Your friend waits 10 minutes for you. Open `/knock` in a new window and press Enter on the top row.
 - **knock speaks English, or Korean.** English is the default. Pick 한국어 on the first screen of `/knock` or in `/knock me`, or type `/knock me lang ko`. It applies to every window on this computer.
 
 ## More
@@ -87,6 +88,11 @@ A knock notice (🚪) shows up only in a **window that's waiting on a knock**: o
   - *Today* counts everyone who used knock in the last 24 hours, you included.
 - **Esc**: interrupts the chat turn, and Claude Code shows `Interrupted`. Use `/knock off` to leave cleanly.
 - **`/clear` in a chat**: clears the screen and Claude's history, and the chat goes on. knock keeps your name and your chat or room.
+- **When a window closes or drops mid-chat**: closing it, a laptop going to sleep or a lost network doesn't end the chat for good.
+  - The other window says so and waits 10 minutes for it to come back. Meanwhile what's typed there goes to Claude, and `/knock off` stops the wait.
+  - A window that wakes up or gets the network back picks the chat up by itself. So does a room or a lobby.
+  - In a new window, the top row of `/knock` reads `🔁 Reconnect with bob · waiting for you`. Press Enter and you're connected again. A new window opened in those 10 minutes also says so.
+  - `/knock off`, `/knock next` or blocking is a goodbye: the other side doesn't wait. Changed your mind? For an hour, the top row of `/knock` knocks again on the one you talked with last, someone met at random too.
 
 </details>
 

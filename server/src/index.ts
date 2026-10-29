@@ -80,8 +80,8 @@ app.post('/pic', perUser, async c => {
 })
 
 app.post('/leave', perUser, async c => {
-  const { window } = await body(c)
-  return reply(c, await hub(c).leave(token(c), str(window)))
+  const { window, closed } = await body(c)
+  return reply(c, await hub(c).leave(token(c), str(window), closed === true))
 })
 
 app.get('/poll', async c => {

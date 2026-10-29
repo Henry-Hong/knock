@@ -33,7 +33,8 @@ export type KnockEvent =
   // `group` is set when it was said in a group room, with the sender's `color` if they picked one;
   // `isClaude` when it is Claude's answer to `from`, who asked with @claude.
   | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string; isClaude?: true }
-  | { type: 'left'; peer: string; reason: 'left' | 'timeout' }
+  // reason: 'left', the peer ended the chat; 'closed', their window closed; 'timeout', it went quiet.
+  | { type: 'left'; peer: string; reason: 'left' | 'closed' | 'timeout' }
   // A picture, as `message` is said: `png` the whole file, base64.
   | { type: 'picture'; from: string; png: string; at: number; group?: string }
   // Someone came into or went out of this window's group room; count is how many are in it now.
@@ -302,12 +303,13 @@ export class Hub extends DurableObject<Env> {
     return ok({ to })
   }
 
-  async leave(token: string, window: string): Promise<Result<{}>> {
+  // Ends this window's chat; isClosed when the window itself is closing, which the peer hears as such.
+  async leave(token: string, window: string, isClosed = false): Promise<Result<{}>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     const live = this.live.get(me)
     if (live?.window === window) {
-      this.part(me, 'left')
+      this.part(me, isClosed ? 'closed' : 'left')
       this.depart(me, 'left')
       live.waiter?.([])
       this.live.delete(me)
@@ -427,7 +429,7 @@ export class Hub extends DurableObject<Env> {
   }
 
   // Ends `name`'s connection, telling the peer, who drops back out of chat.
-  private part(name: string, reason: 'left' | 'timeout') {
+  private part(name: string, reason: 'left' | 'closed' | 'timeout') {
     const live = this.live.get(name)
     if (!live?.peer) return
     const peer = this.live.get(live.peer)

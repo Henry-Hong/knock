@@ -52,6 +52,10 @@ const LISTEN_MS = 30 * 60_000
 // replies only while this much is left, and end the turn before it runs out.
 const ANIMATE_MS = 3_000
 const RESERVE_MS = 1_000
+// When a peer's window closes or goes quiet, this one waits this long for them to come back.
+const RETURN_MS = 10 * 60_000
+// The menu offers to reconnect with whoever this window chatted with last, for this long after.
+const LAST_MS = 60 * 60_000
 
 // Module state starts over on a hot reload; at worst a message is never drawn.
 let loop = 0 // bumped to stop the background poll loop
@@ -184,7 +188,7 @@ async function showStatus($: $, chat: Chat | null) {
         : chat.isConnected
           ? `${chat.isRandom ? '🎲' : '💬'} ${me} ↔ ${chat.peer}`
           : chat.peer
-            ? `⏳ ${me} → ${chat.peer} ${t('waiting', '기다리는 중')}`
+            ? `⏳ ${me} → ${chat.peer} ${chat.returnBy ? t('may come back', '돌아오길 기다리는 중') : t('waiting', '기다리는 중')}`
             : `🎲 ${me} · ${t(`looking in ${lobbyOf(chat.room)}`, `${lobbyOf(chat.room)}에서 상대 찾는 중`)}`,
   )
 }
@@ -342,6 +346,7 @@ async function endChat($: $) {
   loop++
   recent = []
   const { value: chat } = await $.state.get(CHAT)
+  await noteLast($, chat)
   // Whose words this chat left in the history: the peer, or everyone met in the room.
   const met = !chat?.isConnected ? [] : chat.group ? (chat.seen ?? []) : chat.peer ? [chat.peer] : []
   if (met.length) {
@@ -417,11 +422,13 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       return
     }
     case 'connected': {
-      const chat = { peer: event.peer, isConnected: true, isRandom: !!event.isRandom, room: current?.room }
+      // Taken up again with the same peer, a stranger met at random is still one.
+      const isSame = current?.peer === event.peer
+      const chat = { peer: event.peer, isConnected: true, isRandom: !!event.isRandom || (isSame && !!current.isRandom), room: current?.room }
       if (!chat.isRandom) await noteRecent($, 'friends', event.peer)
       await $.state.set(CHAT, chat)
       await showStatus($, chat)
-      notice($, connectedText(event.peer, chat.isRandom))
+      notice($, isSame && current.returnBy ? backText(event.peer) : connectedText(event.peer, chat.isRandom))
       return
     }
     case 'knocked':
@@ -429,12 +436,12 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       return
     case 'left':
       await endChat($)
+      // Their window closed or went quiet, so they may well come back.
+      if (event.reason !== 'left') return awaitReturn($, event.peer, event.reason, current)
       notice(
         $,
         say(
-          event.reason === 'timeout'
-            ? t(`Lost the connection with ${event.peer}. Back to Claude.`, `${event.peer} 님과의 연결이 끊겼습니다. 다시 Claude와 대화합니다.`)
-            : t(`${event.peer} left. Back to Claude.`, `${event.peer} 님이 나갔습니다. 다시 Claude와 대화합니다.`),
+          t(`${event.peer} left. Back to Claude.`, `${event.peer} 님이 나갔습니다. 다시 Claude와 대화합니다.`),
           current?.isRandom && `${t('Find someone else', '다른 상대 찾기')}: /knock random${current.room ? ` ${current.room}` : ''}`,
         ),
       )
@@ -444,17 +451,97 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       notice($, t('knock opened in another window, and the chat moved there.', '다른 창에서 knock을 열어 연결이 그 창으로 넘어갔습니다.'))
       return
     case 'ended':
+      // The server let this window go, as it went quiet a while (asleep, offline) or the server
+      // restarted: take the chat up again as it was.
       await endChat($)
-      notice(
-        $,
-        say(
-          t('The chat ended.', '연결이 종료되었습니다.'),
-          current?.group
-            ? `${t('Rejoin', '다시 들어가기')}: /knock room ${current.group}`
-            : `${t('Reconnect', '다시 연결')}: /knock <${t('name', '이름')}>`,
-        ),
-      )
+      if (current) notice($, await rejoin($, current))
   }
+}
+
+const backText = (peer: string) =>
+  say(
+    `🔁 ${t(`${peer} came back. Connected again.`, `${peer} 님이 돌아와 다시 연결되었습니다.`)}`,
+    t(`What you type goes to ${peer} again`, `이제 입력하면 다시 ${peer} 님에게 전달됩니다`),
+    t('End: /knock off', '끝내기: /knock off'),
+  )
+
+// The peer's window closed or went quiet. Knock on them again, so they connect at once if they come
+// back in time: their window does by itself, after a nap or a hiccup; a new one, from /knock.
+// Meanwhile prompts go to Claude, and after RETURN_MS the wait ends by itself.
+async function awaitReturn($: $, peer: string, reason: 'closed' | 'timeout', before: Chat | null | undefined) {
+  const lost =
+    reason === 'closed'
+      ? t(`${peer}'s window closed.`, `${peer} 님의 창이 닫혔습니다.`)
+      : t(`Lost the connection with ${peer}.`, `${peer} 님과의 연결이 끊겼습니다.`)
+  const r = await api($, 'POST', '/knock', { window: await $.session.id(), to: peer }).catch(() => null)
+  if (r?.status !== 200) {
+    notice($, say(`${lost} ${t('Back to Claude.', '다시 Claude와 대화합니다.')}`, `${t('Knock again', '다시 노크')}: /knock ${peer}`))
+    return
+  }
+  const isConnected = r.data?.state === 'connected'
+  const returnBy = (await $.clock.now()) + RETURN_MS
+  const chat: Chat = { peer, isConnected, isRandom: !!before?.isRandom, room: before?.room, ...(!isConnected && { returnBy }) }
+  await $.state.set(CHAT, chat)
+  await showStatus($, chat)
+  startLoop($)
+  if (isConnected) return notice($, backText(peer))
+  notice(
+    $,
+    say(
+      `${lost} ${t(`If they come back within ${RETURN_MS / 60_000} minutes, you're connected again at once.`, `${RETURN_MS / 60_000}분 안에 돌아오면 바로 다시 연결됩니다.`)}`,
+      t('Until then, what you type goes to Claude', '그동안 입력은 Claude에게 갑니다'),
+      t('Stop waiting: /knock off', '그만 기다리기: /knock off'),
+    ),
+  )
+  $.clock.after(RETURN_MS, () => void stopAwaiting($, peer, returnBy))
+}
+
+// The wait for a peer to come back ran out: stop knocking on them, if this window still waits.
+async function stopAwaiting($: $, peer: string, returnBy: number) {
+  const { value: chat } = await $.state.get(CHAT)
+  if (chat?.returnBy !== returnBy) return
+  await endChat($)
+  await api($, 'POST', '/leave', { window: await $.session.id() }).catch(() => undefined)
+  notice($, say(t(`${peer} did not come back, so knock stopped waiting.`, `${peer} 님이 돌아오지 않아 기다리기를 그만두었습니다.`), `${t('Knock again', '다시 노크')}: /knock ${peer}`))
+}
+
+// Takes a chat the server let go of up again: the lobby looked in, the room joined, the peer knocked
+// on (connected at once if they wait for this window to come back). Says how it went.
+async function rejoin($: $, chat: Chat): Promise<string> {
+  const unreachable = t('could not reach the server', '서버에 닿지 못함')
+  if (chat.isRandom && !chat.peer) {
+    return seek($, chat.room ?? '', chat.since).catch(() =>
+      say(t(`Disconnected (${unreachable}).`, `연결이 끊겼습니다 (${unreachable}).`), `${t('Look again', '다시 찾기')}: /knock random${chat.room ? ` ${chat.room}` : ''}`),
+    )
+  }
+  const kept = await pickUp($, chat).catch(() => unreachable)
+  if (typeof kept === 'string') {
+    return say(
+      t(`Disconnected (${kept}).`, `연결이 끊겼습니다 (${kept}).`),
+      chat.group ? `${t('Rejoin', '다시 들어가기')}: /knock room ${chat.group}` : `${t('Knock again', '다시 노크')}: /knock ${chat.peer}`,
+    )
+  }
+  if (kept.group) return t(`🔁 The connection dropped for a moment. You're back in room '${kept.group}'.`, `🔁 연결이 잠시 끊겼다가 '${kept.group}' 방에 다시 들어왔습니다.`)
+  if (kept.isConnected) return t(`🔁 The connection dropped for a moment. Connected with ${kept.peer} again.`, `🔁 연결이 잠시 끊겼다가 ${kept.peer} 님과 다시 이어졌습니다.`)
+  // Dropped mid-chat, and the peer is not waiting: their window may be gone a while too. Wait for it
+  // as for any peer's return.
+  if (chat.isConnected && !kept.returnBy) {
+    const returnBy = (await $.clock.now()) + RETURN_MS
+    const waiting = { ...kept, returnBy }
+    await $.state.set(CHAT, waiting)
+    await showStatus($, waiting)
+    $.clock.after(RETURN_MS, () => void stopAwaiting($, kept.peer!, returnBy))
+    return say(
+      `🔁 ${t(`The connection dropped for a moment, so you knocked on ${kept.peer} again.`, `연결이 잠시 끊겨 ${kept.peer} 님에게 다시 노크했습니다.`)}`,
+      t(`If ${kept.peer} comes back within ${RETURN_MS / 60_000} minutes, you're connected again at once`, `${RETURN_MS / 60_000}분 안에 ${kept.peer} 님이 돌아오면 바로 다시 연결됩니다`),
+      t('Stop waiting: /knock off', '그만 기다리기: /knock off'),
+    )
+  }
+  return say(
+    `🔁 ${t(`The connection dropped for a moment, so you knocked on ${kept.peer} again.`, `연결이 잠시 끊겨 ${kept.peer} 님에게 다시 노크했습니다.`)}`,
+    t(`When ${kept.peer} knocks back, you're connected`, `${kept.peer} 님이 받으면 다시 이어집니다`),
+    t('Stop: /knock off', '그만두기: /knock off'),
+  )
 }
 
 // Between chat turns the background loop polls; messages it gets start a 📨 turn.
@@ -565,6 +652,7 @@ function statusOf(chat: Chat | null | undefined, me: string) {
   if (!chat) return t('not connected', '연결 없음')
   if (chat.group) return groupLine(chat, me)
   if (chat.isConnected) return `${chat.isRandom ? '🎲' : '💬'} ${t(`chatting with ${chat.peer}`, `${chat.peer} 님과 대화 중`)}`
+  if (chat.returnBy) return `⏳ ${t(`waiting for ${chat.peer} to come back`, `${chat.peer} 님이 돌아오길 기다리는 중`)}`
   return chat.peer
     ? `⏳ ${t(`waiting for ${chat.peer}`, `${chat.peer} 님 기다리는 중`)}`
     : `🎲 ${t(`looking in ${lobbyOf(chat.room)}`, `${lobbyOf(chat.room)}에서 상대 찾는 중`)}`
@@ -640,6 +728,27 @@ async function noteRecent($: $, kind: keyof Recent, value: string) {
   recent[kind] = [value, ...recent[kind].filter(one => one !== value)].slice(0, 8)
   await $.store.set(`recent:${await serverOf($)}`, recent)
 }
+
+// Who a name chatted with last, and when that chat ended (or its window closed on it), to reconnect.
+type Last = { name: string; at: number; isRandom: boolean }
+
+const lastKey = async ($: $, me: string) => `last:${await serverOf($)}:${me}`
+
+async function lastOf($: $, me: string): Promise<Last | null> {
+  const stored = (await $.store.get(await lastKey($, me))) as Partial<Last> | undefined
+  return typeof stored?.name === 'string' && typeof stored.at === 'number'
+    ? { name: stored.name, at: stored.at, isRandom: !!stored.isRandom }
+    : null
+}
+
+async function noteLast($: $, chat: Chat | null | undefined) {
+  const { value: me } = await $.state.get(ME)
+  if (!me || !chat?.isConnected || !chat.peer) return
+  await $.store.set(await lastKey($, me), { name: chat.peer, at: await $.clock.now(), isRandom: !!chat.isRandom })
+}
+
+// How long ago, from minutes.
+const agoOf = (minutes: number) => (minutes < 1 ? t('just now', '방금') : t(`${minutes} min ago`, `${minutes}분 전`))
 
 // A picture is a whole PNG, base64, up to 4 MiB decoded (what $.fs.read reads at once), as the server
 // takes it. The sharp view draws one up to 2 MiB; the block view, any size.
@@ -1077,6 +1186,8 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
   const [mine, knocks] = me ? await Promise.all([api($, 'GET', '/me'), api($, 'GET', '/knocks')]) : [null, null]
   const recent = await recentOf($)
   const isLangPicked = (await $.store.get('lang')) !== undefined
+  const last = me ? await lastOf($, me) : null
+  const ago = last ? (await $.clock.now()) - last.at : Infinity
   await $.state.set(MENU, {
     step: me ? step : isLangPicked ? 'name' : 'lang',
     color: mine?.status === 200 ? ((mine.data?.color as string | null) ?? null) : null,
@@ -1084,6 +1195,7 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
     others: typeof knocks?.data?.others === 'number' ? knocks.data.others : undefined,
     waiting: typeof knocks?.data?.waiting === 'number' ? knocks.data.waiting : undefined,
     today: typeof knocks?.data?.today === 'number' ? knocks.data.today : undefined,
+    last: last && ago < LAST_MS ? { name: last.name, minutes: Math.floor(ago / 60_000), isRandom: last.isRandom } : undefined,
     ...recent,
   })
   const opened = await showMenu($)
@@ -1185,9 +1297,14 @@ async function completions($: $, words: string[]): Promise<PromptAutocompleteSug
   const recent = await recentOf($)
   const [first = '', second = ''] = words.map(word => word.toLowerCase())
   if (words.length === 1) {
+    // Whoever this window chatted with last, met at random too, first among the names.
+    const { value: me } = await $.state.get(ME)
+    const last = me ? await lastOf($, me) : null
+    const lately = last && (await $.clock.now()) - last.at < LAST_MS ? [last.name] : []
     return [
       ...starting(Object.keys(SUBCOMMANDS)).map(word => ({ text: word, description: SUBCOMMANDS[word as keyof typeof SUBCOMMANDS]() })),
-      ...starting(recent.friends).map(name => ({ text: name, description: t('recent friend · knock', '최근 친구 · 노크') })),
+      ...starting(lately).map(name => ({ text: name, description: t('talked lately · reconnect', '최근 대화 · 다시 연결') })),
+      ...starting(recent.friends.filter(name => !lately.includes(name))).map(name => ({ text: name, description: t('recent friend · knock', '최근 친구 · 노크') })),
     ]
   }
   if (words.length === 2 && first === 'pic') return starting(['paste']).map(word => ({ text: word, description: t('send the picture you copied', '복사한 사진 보내기') }))
@@ -1290,16 +1407,19 @@ async function knock($: $, args: string): Promise<string> {
   if (to === me) return t('You cannot knock on yourself.', '자기 자신에게는 노크할 수 없습니다.')
 
   const { value: before } = await $.state.get(CHAT)
+  // Reconnecting with a stranger met at random, they are still one.
+  const last = await lastOf($, me)
+  const isRandom = last?.name === to && last.isRandom
   const r = await api($, 'POST', '/knock', { window: await $.session.id(), to })
   if (r.status !== 200) return errorOf(r, { 404: t(`No one is named ${to}. Check your friend's knock name.`, `없는 이름입니다: ${to}. 친구의 knock 이름을 확인해 주세요.`) })
   // The server ended the chat this window was in; so does the window.
   if (before?.isConnected && before.peer !== to) await endChat($)
-  await noteRecent($, 'friends', to)
-  const chat = { peer: to, isConnected: r.data?.state === 'connected' }
+  if (!isRandom) await noteRecent($, 'friends', to)
+  const chat = { peer: to, isConnected: r.data?.state === 'connected', ...(isRandom && { isRandom }) }
   await $.state.set(CHAT, chat)
   await showStatus($, chat)
   startLoop($)
-  if (chat.isConnected) return connectedText(to)
+  if (chat.isConnected) return connectedText(to, isRandom)
   // Only a window that waits on a knock hears one, so the peer may not know yet.
   return r.data?.isNotified
     ? say(
@@ -1388,22 +1508,32 @@ async function carryOver($: $, oldId: string, me: string | null | undefined, cha
     notice($, await seek($, chat.room ?? '', chat.since))
     return
   }
+  const kept = await pickUp($, chat)
+  if (typeof kept === 'string') {
+    await showStatus($, null)
+    notice($, t(`The chat ended with the clear (${kept})`, `대화 기록을 지우면서 연결이 끊겼습니다 (${kept})`))
+    return
+  }
+  notice($, say(t('History cleared. The chat goes on.', '대화 기록을 지웠습니다. 채팅은 그대로 이어집니다.'), t('End: /knock off', '끝내기: /knock off')))
+}
+
+// Takes a room or a peer up again under this window's id: the room joined, the peer knocked on,
+// connected at once if they still are, or knock on this window. The chat as it is now, or what went wrong.
+async function pickUp($: $, chat: Chat): Promise<Chat | string> {
   const window = await $.session.id()
   const r = chat.group
     ? await api($, 'POST', '/room', { window, room: chat.group })
     : await api($, 'POST', '/knock', { window, to: chat.peer })
-  if (r.status !== 200) {
-    await showStatus($, null)
-    notice($, t(`The chat ended with the clear (${errorOf(r)})`, `대화 기록을 지우면서 연결이 끊겼습니다 (${errorOf(r)})`))
-    return
-  }
-  const kept = chat.group
+  if (r.status !== 200) return errorOf(r)
+  const { returnBy, ...rest } = chat
+  const isConnected = chat.group ? true : r.data?.state === 'connected'
+  const kept: Chat = chat.group
     ? { ...chat, members: (r.data?.members ?? chat.members) as string[] }
-    : { ...chat, isConnected: r.data?.state === 'connected' }
+    : { ...rest, isConnected, ...(!isConnected && returnBy && { returnBy }) }
   await $.state.set(CHAT, kept)
   await showStatus($, kept)
   startLoop($)
-  notice($, say(t('History cleared. The chat goes on.', '대화 기록을 지웠습니다. 채팅은 그대로 이어집니다.'), t('End: /knock off', '끝내기: /knock off')))
+  return kept
 }
 
 // Who else is in the room, or that no one is yet.
@@ -1457,7 +1587,21 @@ async function leave($: $): Promise<string> {
   await api($, 'POST', '/leave', { window: await $.session.id() }).catch(() => undefined)
   if (chat.group) return t(`Left room '${chat.group}'. Back to Claude.`, `'${chat.group}' 방에서 나왔습니다. 다시 Claude와 대화합니다.`)
   if (!chat.peer) return t('Stopped looking.', '상대 찾기를 그만두었습니다.')
-  return t(`Disconnected from ${chat.peer}. Back to Claude.`, `${chat.peer} 님과의 연결을 끊었습니다. 다시 Claude와 대화합니다.`)
+  if (!chat.isConnected) return t(`Stopped waiting for ${chat.peer}.`, `${chat.peer} 님 기다리기를 그만두었습니다.`)
+  return say(
+    t(`Disconnected from ${chat.peer}. Back to Claude.`, `${chat.peer} 님과의 연결을 끊었습니다. 다시 Claude와 대화합니다.`),
+    `${t('By mistake? Knock again', '실수였다면 다시 노크')}: /knock ${chat.peer}`,
+  )
+}
+
+// A new window, a moment after one closed mid-chat: if that peer waits for it to come back, say so.
+async function sayAwaited($: $) {
+  const { value: me } = await $.state.get(ME)
+  const last = me ? await lastOf($, me) : null
+  if (!last || (await $.clock.now()) - last.at > RETURN_MS) return
+  const r = await api($, 'GET', '/knocks')
+  if (!((r.data?.from ?? []) as string[]).includes(last.name) || (await $.state.get(CHAT)).value) return
+  notice($, say(`🔁 ${t(`${last.name} is waiting for you to come back.`, `${last.name} 님이 돌아오길 기다리고 있습니다.`)}`, `${t('Reconnect', '다시 연결')}: /knock ${last.name}`))
 }
 
 const withServer = async ($: $, run: () => Promise<string>) => {
@@ -1543,7 +1687,7 @@ export const register: Register = on => {
     if (chat) {
       await showStatus($, chat)
       startLoop($)
-    }
+    } else $.clock.after(0, () => void sayAwaited($).catch(err => dbg($, `awaited check failed: ${err}`)))
     return started
   })
 
@@ -1777,10 +1921,22 @@ export const register: Register = on => {
       )
     }
 
-    // Home. Who knocked shows as one row: one name connects at once, more open the friend step.
-    const knocked = menu.knocks
+    // Home. First, whoever this window chatted with last, unless in a chat now: connected at once if
+    // they wait for it to come back, else knocked on again. Then who knocked, as one row: one name
+    // connects at once, more open the friend step.
+    const last = menu.last && !chat?.isConnected && chat?.peer !== menu.last.name ? menu.last : null
+    const isAwaited = !!last && menu.knocks.includes(last.name)
+    const knocked = menu.knocks.filter(name => name !== last?.name)
     return list(
       [
+        ...(last
+          ? [{
+              key: 'again',
+              label: `🔁 ${t(`Reconnect with ${last.name}`, `${last.name} 님과 다시 연결`)} · ${isAwaited ? t('waiting for you', '나를 기다리는 중') : t(`talked ${agoOf(last.minutes)}`, `${agoOf(last.minutes)} 대화`)}`,
+              hint: isAwaited ? t('Enter connects at once', 'Enter로 바로 연결') : t('Enter to knock again', 'Enter로 다시 노크'),
+              run: () => void act($, () => knock($, last.name)),
+            }]
+          : []),
         ...(knocked.length === 1
           ? [{ key: 'knocked', label: `🚪 ${t(`Connect with ${knocked[0]} (knocked on you)`, `${knocked[0]} 님과 연결하기 (나에게 노크함)`)}`, run: () => void act($, () => knock($, knocked[0]!)) }]
           : knocked.length > 1
@@ -2063,7 +2219,11 @@ export const register: Register = on => {
       $.clock.after(0, () => void carryOver($, e.sessionId, me, chat).catch(err => dbg($, `carry over failed: ${err}`)))
       return next(e)
     }
-    if (chat) await api($, 'POST', '/leave', { window: await $.session.id() }).catch(() => undefined)
+    // Closing a window is no goodbye: the peer hears it closed, and waits a while for it to come back.
+    if (chat) {
+      await noteLast($, chat)
+      await api($, 'POST', '/leave', { window: await $.session.id(), closed: true }).catch(() => undefined)
+    }
     return next(e)
   })
 }

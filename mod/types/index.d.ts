@@ -2,12 +2,14 @@
 // peer yet, in a random lobby. room is that lobby: '' for the open one, else a group's code.
 // In a group room (group) there is no peer: members is who is in it now, the person included,
 // and seen everyone else who was there with them. since is when it started looking in the lobby.
+// returnBy: the peer's window closed or went quiet, and this one waits for them to come back until then.
 export type Chat = {
   peer: string | null
   isConnected: boolean
   isRandom?: boolean
   room?: string
   since?: number
+  returnBy?: number
   group?: string
   members?: string[]
   seen?: string[]
@@ -18,7 +20,7 @@ export type KnockEvent =
   | { type: 'connected'; peer: string; isRandom?: boolean }
   | { type: 'knocked'; from: string }
   | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string; isClaude?: true }
-  | { type: 'left'; peer: string; reason: 'left' | 'timeout' }
+  | { type: 'left'; peer: string; reason: 'left' | 'closed' | 'timeout' }
   | { type: 'picture'; from: string; png: string; at: number; group?: string }
   | { type: 'joined'; name: string; count: number }
   | { type: 'departed'; name: string; count: number; reason: 'left' | 'timeout' }
@@ -44,6 +46,8 @@ export type Menu = {
   others?: number
   waiting?: number
   today?: number
+  // Who this window chatted with last, in the past hour, and how many minutes ago it ended.
+  last?: { name: string; minutes: number; isRandom: boolean }
 }
 
 declare module 'claude-code' {
