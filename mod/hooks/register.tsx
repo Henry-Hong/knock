@@ -129,6 +129,20 @@ const namesOf = (names: string[]) =>
     ? `${names.slice(0, 3).join(', ')} ${t(`and ${names.length - 3} more`, `외 ${names.length - 3}명`)}`
     : names.join(', ')
 
+// The cells a text takes in the terminal: Hangul, CJK and emoji take two.
+const widthOf = (text: string) =>
+  [...text].reduce((sum, ch) => {
+    const code = ch.codePointAt(0) ?? 0
+    const isWide =
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      code >= 0x1f300
+    return sum + (isWide ? 2 : 1)
+  }, 0)
+
 // Looking in a lobby, with no one met yet.
 const isLooking = (chat: Chat | null | undefined): chat is Chat => !!chat?.isRandom && !chat.peer
 
@@ -1586,7 +1600,9 @@ export const register: Register = on => {
     // Under a field a digit is typed into it, so the way back there has no key.
     const back = (hasKey: boolean): Row => ({ key: 'back', hotkey: hasKey ? '0' : undefined, label: t('← Back', '← 뒤로'), run: goBack })
 
-    type Row = { key: string; hotkey?: string; label?: string; content?: typeof header; run: () => void }
+    // label is the row's text, and content the same text styled, where it has styles. more, drawn dim
+    // in one column after the rows' text, marks a row that opens another step.
+    type Row = { key: string; hotkey?: string; label?: string; content?: typeof header; more?: string; run: () => void }
     // The step: its lead (a line, or the field), then its rows, a page of them if they do not fit.
     const list = (rows: Row[], lead: typeof header | null, hint: string) => {
       const fixed = lead ? 1 : 0
@@ -1599,14 +1615,18 @@ export const register: Register = on => {
       const shown = rows.slice(page * perPage, (page + 1) * perPage)
       const left = rows.length - (page + 1) * perPage
       const next = (page + 1) % pages
+      const widest = Math.max(0, ...shown.filter(row => row.more).map(row => widthOf(row.label ?? '')))
       return (
         <Box flexDirection="column">
           {withHeader && header}
           {lead}
           {shown.map((row, i) =>
-            row.content ? (
+            row.content || row.more ? (
               <Button key={row.key} plain hotkey={row.hotkey} autoFocus={!lead && i === 0 ? true : undefined} onPress={row.run}>
-                {row.content}
+                <Text>
+                  {row.content ?? row.label}
+                  {row.more && <Text dimColor>{' '.repeat(widest - widthOf(row.label ?? '') + 3) + row.more}</Text>}
+                </Text>
               </Button>
             ) : (
               <Button key={row.key} plain hotkey={row.hotkey} autoFocus={!lead && i === 0 ? true : undefined} label={row.label} onPress={row.run} />
@@ -1672,22 +1692,26 @@ export const register: Register = on => {
     }
     if (menu.step === 'me') {
       const color = colorFor(me, menu.color)
+      const colorText = `${colorName(color)}${isColor(menu.color) ? '' : t(' (auto)', ' (자동)')}`
+      const change = t('change ›', '바꾸기 ›')
       return list(
         [
           {
             key: 'color',
             hotkey: '1',
+            label: `${t("Name's color", '이름 색')}: ● ${colorText}`,
             content: (
               <Text>
                 {`${t("Name's color", '이름 색')}: `}
                 <Text color={COLORS[color].hex}>●</Text>
-                {` ${colorName(color)}${isColor(menu.color) ? '' : t(' (auto)', ' (자동)')} …`}
+                {` ${colorText}`}
               </Text>
             ),
+            more: change,
             run: () => void goto($, 'color'),
           },
-          { key: 'lang', hotkey: '2', label: `${t('Language', '언어')}: ${lang === 'ko' ? '한국어' : 'English'} …`, run: () => void goto($, 'lang') },
-          { key: 'rename', hotkey: '3', label: `${t('Name', '이름')}: ${me} …`, run: () => void goto($, 'name') },
+          { key: 'lang', hotkey: '2', label: `${t('Language', '언어')}: ${lang === 'ko' ? '한국어' : 'English'}`, more: change, run: () => void goto($, 'lang') },
+          { key: 'rename', hotkey: '3', label: `${t('Name', '이름')}: ${me}`, more: change, run: () => void goto($, 'name') },
           back(true),
         ],
         null,
@@ -1728,18 +1752,18 @@ export const register: Register = on => {
         ...(knocked.length === 1
           ? [{ key: 'knocked', label: `🚪 ${t(`Connect with ${knocked[0]} (knocked on you)`, `${knocked[0]} 님과 연결하기 (나에게 노크함)`)}`, run: () => void act($, () => knock($, knocked[0]!)) }]
           : knocked.length > 1
-            ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you…`, `${namesOf(knocked)} 님이 노크함…`)}`, run: () => void goto($, 'friend') }]
+            ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you`, `${namesOf(knocked)} 님이 노크함`)}`, more: '›', run: () => void goto($, 'friend') }]
             : []),
-        { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
+        { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), more: '›', run: () => void goto($, 'friend') },
         { key: 'random', label: t('Meet someone at random', '아무나 만나기') + waitingOf(menu), run: () => void act($, () => random($, '')) },
-        { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
+        { key: 'room', label: t('Join a room', '방 들어가기'), more: '›', run: () => void goto($, 'room') },
         ...(chat?.isConnected
           ? [{ key: 'paste', label: t('Send the picture you copied', '복사한 사진 보내기'), run: () => void act($, () => pastePicture($)) }]
           : []),
         ...(pictures.length
           ? [{ key: 'pictures', label: t(`See the pictures (${pictures.length})`, `받은 사진 보기 (${pictures.length})`), run: () => void act($, () => openViewer($)) }]
           : []),
-        { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), run: () => void goto($, 'me') },
+        { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), more: '›', run: () => void goto($, 'me') },
         ...(chat
           ? [{
               key: 'off',
