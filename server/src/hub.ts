@@ -21,6 +21,9 @@ const SKIP_MS = 60_000
 const PNG_MAX = Math.ceil((4 * 1024 * 1024) / 3) * 4
 const PNG_HEAD = 'iVBORw0KGgo'
 const PICTURES_PER_MINUTE = 6
+// Who used knock lately: when each user was last heard from is written down at most this often.
+const SEEN_WRITE_MS = 5 * 60_000
+const DAY_MS = 24 * 60 * 60_000
 // The colors a name can be drawn in; the client picks the shades.
 const COLORS = ['red', 'orange', 'yellow', 'green', 'sky', 'blue', 'purple', 'pink']
 
@@ -72,6 +75,8 @@ export class Hub extends DurableObject<Env> {
   private groups = new Map<string, Set<string>>()
   // When each user sent their latest pictures, to hold them to a few a minute.
   private sentPictures = new Map<string, number[]>()
+  // When each user's seen_at was last written, to write it at most every SEEN_WRITE_MS.
+  private seenWrites = new Map<string, number>()
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -83,6 +88,7 @@ export class Hub extends DurableObject<Env> {
     )
     const columns = ctx.storage.sql.exec('PRAGMA table_info(users)').toArray().map(column => column.name)
     if (!columns.includes('color')) ctx.storage.sql.exec('ALTER TABLE users ADD COLUMN color TEXT')
+    if (!columns.includes('seen_at')) ctx.storage.sql.exec('ALTER TABLE users ADD COLUMN seen_at INTEGER')
   }
 
   async register(name: string): Promise<Result<{ name: string; token: string }>> {
@@ -90,9 +96,10 @@ export class Hub extends DurableObject<Env> {
     if (this.exists(name)) return fail(409, `${name} is taken`)
     const token = crypto.randomUUID()
     this.ctx.storage.sql.exec(
-      'INSERT INTO users (name, token_hash, created_at) VALUES (?, ?, ?)',
+      'INSERT INTO users (name, token_hash, created_at, seen_at) VALUES (?, ?, ?, ?)',
       name,
       await hash(token),
+      Date.now(),
       Date.now(),
     )
     return ok({ name, token })
@@ -217,9 +224,12 @@ export class Hub extends DurableObject<Env> {
     return ok({ blocked: name })
   }
 
-  // Who knocked on this user, with how many are on knock now and how many of them, not blocked
-  // either way, wait in the open lobby.
-  async knocks(token: string): Promise<Result<{ from: string[]; online: number; waiting: number }>> {
+  // Who knocked on this user, with how many others are on knock now, how many of them, not
+  // blocked either way, wait in the open lobby, and how many used knock in the last 24 hours.
+  // online, everyone on knock now, is for clients from before others.
+  async knocks(
+    token: string,
+  ): Promise<Result<{ from: string[]; online: number; others: number; waiting: number; today: number }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     this.sweep()
@@ -228,11 +238,12 @@ export class Hub extends DurableObject<Env> {
       .map(([name]) => name)
     const blocked = this.blocked(me)
     const waiting = [...this.live].filter(([name, l]) => name !== me && l.seeking === '' && !l.peer && !blocked.has(name))
-    return ok({ from, online: this.live.size, waiting: waiting.length })
+    const others = this.live.size - (this.live.has(me) ? 1 : 0)
+    return ok({ from, online: this.live.size, others, waiting: waiting.length, today: this.today() })
   }
 
   // How many are on knock now: each in a chat, knocking, looking for a match or in a room. No names.
-  async stats(): Promise<{ online: number; chatting: number; looking: number; inRooms: number; rooms: number }> {
+  async stats(): Promise<{ online: number; chatting: number; looking: number; inRooms: number; rooms: number; today: number }> {
     this.sweep()
     const all = [...this.live.values()]
     return {
@@ -241,6 +252,7 @@ export class Hub extends DurableObject<Env> {
       looking: all.filter(l => l.seeking !== null && !l.peer).length,
       inRooms: all.filter(l => l.group).length,
       rooms: this.groups.size,
+      today: this.today(),
     }
   }
 
@@ -353,10 +365,23 @@ export class Hub extends DurableObject<Env> {
     return (row?.color as string | null | undefined) ?? null
   }
 
+  // Every call a user makes comes through here, so it is also where they are seen using knock.
   private async auth(token: string): Promise<string | null> {
     if (!token) return null
     const row = this.ctx.storage.sql.exec('SELECT name FROM users WHERE token_hash = ?', await hash(token)).toArray()[0]
-    return (row?.name as string | undefined) ?? null
+    const name = (row?.name as string | undefined) ?? null
+    const now = Date.now()
+    if (name && now - (this.seenWrites.get(name) ?? 0) > SEEN_WRITE_MS) {
+      this.seenWrites.set(name, now)
+      this.ctx.storage.sql.exec('UPDATE users SET seen_at = ? WHERE name = ?', now, name)
+    }
+    return name
+  }
+
+  // How many used knock in the last 24 hours.
+  private today(): number {
+    const [row] = this.ctx.storage.sql.exec('SELECT COUNT(*) AS n FROM users WHERE seen_at > ?', Date.now() - DAY_MS).toArray()
+    return Number(row?.n ?? 0)
   }
 
   // A window takes over its user: an older window of the same user is told to stop.

@@ -37,9 +37,11 @@ export type Menu = {
   note?: string
   // Which page of the step's choices shows, when the pane is too short for them all.
   page?: number
-  // How many were on knock when it opened, and how many of them wait in the open lobby.
-  online?: number
+  // When it opened: how many others were on knock, how many of them waited in the open lobby,
+  // and how many used knock in the last 24 hours.
+  others?: number
   waiting?: number
+  today?: number
 }
 
 declare module 'claude-code' {

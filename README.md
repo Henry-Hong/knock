@@ -82,6 +82,9 @@ A knock notice (🚪) shows up only in a **window that's waiting on a knock**: o
 
 - **`› Prompt from the knock plugin`**: a label Claude Code adds when a message arrives while you're idle and knock opens a turn for it. Plugins can't remove it. Later messages land in the same turn, so it shows up once.
 - **Status line**: `💬 alice ↔ bob` means connected. `⏳ alice → bob` means you're waiting for them to knock back. `🎲` marks a random match, or a lobby you're waiting in. `👥 alice · lunch 3/8` means you're in a room with 3 people.
+- **The top of `/knock`**: `alice · not connected · 3 on knock now · 41 today`.
+  - *On knock now* counts the others who are in a chat, knocking on someone, waiting in a lobby or in a room right now. Someone who only has Claude Code open isn't counted: a knock wouldn't reach them anyway.
+  - *Today* counts everyone who used knock in the last 24 hours, you included.
 - **Esc**: interrupts the chat turn, and Claude Code shows `Interrupted`. Use `/knock off` to leave cleanly.
 - **`/clear` in a chat**: clears the screen and Claude's history, and the chat goes on. knock keeps your name and your chat or room.
 
@@ -113,7 +116,7 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 
 - `/knock random` alone is the open lobby, for everyone. `/knock random <code>` is a lobby of its own, so only people who type the same code meet. Use one for a team or a community.
 - The person who has waited longest gets matched first.
-- While you wait, a line above the prompt spins and shows how long you've waited and how many people are on knock right now.
+- While you wait, a line above the prompt spins and shows how long you've waited and how many others are on knock right now.
 - `/knock` shows, next to **Meet someone at random**, how many are waiting in the open lobby. If someone is, you connect at once.
 - `/knock next` moves on. You won't get the person you just left again right away.
 - `/knock block` blocks the person you're chatting with and ends the chat. You never meet them at random again, and their knocks don't notify you. If you knock on each other on purpose, you still connect.
@@ -195,7 +198,7 @@ The default server is `https://knock.everwish.workers.dev`. It runs on Cloudflar
 
 - Accounts store only a name and a hash of its token. The token itself stays on your computer.
 - Messages are relayed, never stored.
-- `GET /stats` tells how many people are on knock right now (in a chat, knocking, waiting in a lobby or in a room): counts only, no names.
+- `GET /stats` tells how many people are on knock right now (in a chat, knocking, waiting in a lobby or in a room) and how many used it in the last 24 hours: counts only, no names. For that count, the server keeps when each name last used knock.
 - Rate limits, per minute: 5 sign-ups per IP, 60 knocks or messages per person, 300 requests per IP.
 
 To run your own server, start Claude Code with `KNOCK_SERVER` pointing at it:

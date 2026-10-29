@@ -116,13 +116,12 @@ const say = (head: string, ...details: (string | false | undefined)[]) =>
 const notice = ($: $, text: string) => $.ui.log(text.replace(/\n(• )?/g, ' · '))
 
 const lobbyOf = (room = '') => (room ? t(`the '${room}' lobby`, `'${room}' 대기실`) : t('the open lobby', '전체 대기실'))
-// After the menu's random row: who waits in the open lobby now, else how many are on knock.
-const crowdOf = (menu: Menu) =>
-  menu.waiting
-    ? ` · ${t(`${menu.waiting} waiting now`, `지금 ${menu.waiting}명 기다리는 중`)}`
-    : menu.online
-      ? ` · ${t(`${menu.online} on knock now`, `지금 ${menu.online}명 접속 중`)}`
-      : ''
+// After the menu's random row: who waits in the open lobby now.
+const waitingOf = (menu: Menu) => (menu.waiting ? ` · ${t(`${menu.waiting} waiting now`, `지금 ${menu.waiting}명 기다리는 중`)}` : '')
+// How many others are on knock now, as the menu's header and the lobby band say it.
+const othersOf = (others: number) =>
+  others ? t(`${others} on knock now`, `지금 knock ${others}명`) : t('no one else on knock now', '지금 접속한 사람 없음')
+const upperFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 const countOf = (chat: Chat) => `${chat.members?.length ?? 1}/${GROUP_MAX}`
 // Up to three names, then how many more.
 const namesOf = (names: string[]) =>
@@ -1048,8 +1047,9 @@ async function openMenu($: $, step: MenuStep = 'home'): Promise<string> {
     step: me ? step : isLangPicked ? 'name' : 'lang',
     color: mine?.status === 200 ? ((mine.data?.color as string | null) ?? null) : null,
     knocks: knocks?.status === 200 ? ((knocks.data?.from ?? []) as string[]) : [],
-    online: typeof knocks?.data?.online === 'number' ? knocks.data.online : undefined,
+    others: typeof knocks?.data?.others === 'number' ? knocks.data.others : undefined,
     waiting: typeof knocks?.data?.waiting === 'number' ? knocks.data.waiting : undefined,
+    today: typeof knocks?.data?.today === 'number' ? knocks.data.today : undefined,
     ...recent,
   })
   const opened = await showMenu($)
@@ -1569,7 +1569,13 @@ export const register: Register = on => {
         <Text color={COLORS[colorFor(me, menu.color)].hex} weight="bold">
           {me}
         </Text>
-        {` · ${statusOf(chat, me)}`}
+        {` · ${[
+          statusOf(chat, me),
+          menu.others !== undefined && othersOf(menu.others),
+          !!menu.today && t(`${menu.today} today`, `오늘 ${menu.today}명`),
+        ]
+          .filter(Boolean)
+          .join(' · ')}`}
       </Text>
     ) : (
       <Text weight="bold">{t('🚪 Welcome to knock', '🚪 knock에 오신 것을 환영합니다')}</Text>
@@ -1725,7 +1731,7 @@ export const register: Register = on => {
             ? [{ key: 'knocked', label: `🚪 ${t(`${namesOf(knocked)} knocked on you…`, `${namesOf(knocked)} 님이 노크함…`)}`, run: () => void goto($, 'friend') }]
             : []),
         { key: 'friend', label: t('Knock on a friend', '친구에게 노크'), run: () => void goto($, 'friend') },
-        { key: 'random', label: t('Meet someone at random', '아무나 만나기') + crowdOf(menu), run: () => void act($, () => random($, '')) },
+        { key: 'random', label: t('Meet someone at random', '아무나 만나기') + waitingOf(menu), run: () => void act($, () => random($, '')) },
         { key: 'room', label: t('Join a room', '방 들어가기'), run: () => void goto($, 'room') },
         ...(chat?.isConnected
           ? [{ key: 'paste', label: t('Send the picture you copied', '복사한 사진 보내기'), run: () => void act($, () => pastePicture($)) }]
@@ -1757,12 +1763,8 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const waited = Math.max(0, Math.floor((now - (chat.since ?? now)) / 1000))
     const clock = `${Math.floor(waited / 60)}:${String(waited % 60).padStart(2, '0')}`
-    const crowd =
-      online == null
-        ? null
-        : online <= 1
-          ? t('On knock now: just you', '지금 knock 접속: 나 혼자')
-          : t(`${online} on knock now`, `지금 knock 접속 ${online}명`)
+    // Looking, this window is on knock itself.
+    const crowd = online == null ? null : upperFirst(othersOf(Math.max(0, online - 1)))
     return (
       <Box flexDirection="column">
         <Text>
