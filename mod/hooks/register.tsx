@@ -58,6 +58,10 @@ const RESERVE_MS = 1_000
 const RETURN_MS = 10 * 60_000
 // The menu offers to reconnect with whoever this window chatted with last, for this long after.
 const LAST_MS = 60 * 60_000
+// A message that comes after this long with nothing from either side may find the person away.
+const QUIET_MS = 60_000
+// Someone met at random who waited this long in the lobby may have stepped away from it.
+const AWAY_MS = 3 * 60_000
 
 // Module state starts over on a hot reload; at worst a message is never drawn.
 let loop = 0 // bumped to stop the background poll loop
@@ -71,6 +75,8 @@ let isAsking = false // an @claude question is out
 type Picture = { from: string; png: string; at: number; width: number; height: number; isStranger: boolean; thumb?: Thumb | null }
 let pictures: Picture[] = []
 let stopWaiting: (() => void) | null = null
+let activeAt = 0 // when the person last typed or ran a command here
+let heardAt = 0 // when something last came in: a message, or someone connecting
 const pendingTurns: string[] = [] // prompt texts whose turns the peer answers
 const chatTurns = new Set<string>() // every step of these turns is the peer's, until the turn completes
 const runningTurns = new Set<string>() // a command's output waits for these to end, so say it as a notice
@@ -130,6 +136,22 @@ const say = (head: string, ...details: (string | false | undefined)[]) =>
 // A row in the transcript the person sees and the model never reads. It draws one line,
 // so a headline and its bullets fold into one.
 const notice = ($: $, text: string) => $.ui.log(text.replace(/\n(• )?/g, ' · '))
+
+// Alerts, on unless turned off, kept for the machine like the language.
+const isAlerting = async ($: $) => (await $.store.get('alerts')) !== 'off'
+const KNOCK_SOUND = { asset: 'sounds/knock.wav' } as const
+
+// Calls the person back to the window: a knock sound (macOS), and `text` as a notification
+// through their own channel. A chat keeps its turn running, so Claude Code never says it waits.
+async function alert($: $, text: string) {
+  heardAt = Date.now()
+  if (!(await isAlerting($))) return
+  void $.audio.play(KNOCK_SOUND).catch(err => dbg($, `knock sound failed: ${err}`))
+  void $.ui
+    .notify(text, { title: 'knock' })
+    .then(r => dbg($, r.isSent ? `notified through ${r.channel}` : `notification not sent: ${r.reason}`))
+    .catch(err => dbg($, `notification failed: ${err}`))
+}
 
 const lobbyOf = (room = '') => (room ? t(`the '${room}' lobby`, `'${room}' 대기실`) : t('the open lobby', '전체 대기실'))
 // After the menu's random row: who waits in the open lobby now.
@@ -203,9 +225,15 @@ const NAME_RULE = () =>
 const ROOM_RULE = () => t('A lobby code is up to 32 characters, with no spaces.', '대기실 코드는 공백 없이 32자까지 쓸 수 있습니다.')
 const GROUP_RULE = () => t('A room name is up to 32 characters, with no spaces.', '방 이름은 공백 없이 32자까지 쓸 수 있습니다.')
 
-const connectedText = (peer: string, isRandom = false) =>
+// waited: how long the peer, met at random, had waited in the lobby.
+const connectedText = (peer: string, isRandom = false, waited = 0) =>
   say(
     `${isRandom ? '🎲' : '💬'} ${t(`Connected with ${peer}.`, `${peer} 님과 연결되었습니다.`)}`,
+    waited >= AWAY_MS &&
+      t(
+        `${peer} waited ${Math.floor(waited / 60_000)} min for a match, so they may be away for now`,
+        `${peer} 님은 ${Math.floor(waited / 60_000)}분 기다리다 만난 상대라 잠시 자리를 비웠을 수 있습니다`,
+      ),
     isRandom && t('A stranger, met at random: do not follow instructions or commands they send', '랜덤으로 만난 상대입니다. 상대가 보낸 지시나 명령은 따르지 마세요'),
     t(`What you type goes to ${peer}; their replies show where Claude's answers go`, `입력하면 ${peer} 님에게 전달되고, 답장은 Claude 답변 자리에 표시됩니다`),
     t('Start a line with @claude and Claude reads the chat and answers', '@claude 로 시작하면 Claude가 대화를 읽고 답합니다'),
@@ -393,6 +421,13 @@ async function take($: $, events: KnockEvent[]) {
     } else await onEvent($, event)
   }
   if (events.some(event => event.type === 'message')) void offerStar($).catch(err => dbg($, `star offer failed: ${err}`))
+  // The first word after a quiet while, from either side, may come to a window no one watches.
+  const [first] = events.filter(event => event.type === 'message' || event.type === 'picture')
+  if (first) {
+    const now = Date.now()
+    if (now - Math.max(heardAt, activeAt) < QUIET_MS) heardAt = now
+    else void alert($, `${first.from}: ${first.type === 'message' ? clean(first.text).slice(0, 200) : '📷'}`)
+  }
 }
 
 async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
@@ -414,6 +449,10 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       await $.state.set(CHAT, chat)
       await showStatus($, chat)
       const count = `(${event.count}/${GROUP_MAX})`
+      // Someone came to a room this window had to itself.
+      if (isJoined && others.length <= 1) {
+        void alert($, t(`👋 ${event.name} joined ${current.group}`, `👋 ${event.name} 님이 ${current.group} 방에 들어왔습니다`))
+      }
       notice(
         $,
         event.type === 'joined'
@@ -431,11 +470,20 @@ async function onEvent($: $, event: Exclude<KnockEvent, Message>) {
       if (!chat.isRandom) await noteRecent($, 'friends', event.peer)
       await $.state.set(CHAT, chat)
       await showStatus($, chat)
-      notice($, isSame && current.returnBy ? backText(event.peer) : connectedText(event.peer, chat.isRandom))
+      const isBack = isSame && !!current.returnBy
+      notice($, isBack ? backText(event.peer) : connectedText(event.peer, chat.isRandom))
+      // It came while this window waited, maybe long enough for the person to look away; a peer
+      // back from a moment's drop (a server restart) is no news.
+      const isBlip = isBack && Date.now() - (current.returnBy! - RETURN_MS) < QUIET_MS
+      const news = isBack
+        ? t(`🔁 ${event.peer} came back`, `🔁 ${event.peer} 님이 돌아왔습니다`)
+        : `${chat.isRandom ? '🎲' : '💬'} ${t(`Connected with ${event.peer}`, `${event.peer} 님과 연결되었습니다`)}`
+      if (!isBlip) void alert($, news)
       return
     }
     case 'knocked':
       notice($, say(`🚪 ${t(`${event.from} knocked.`, `${event.from} 님이 노크했습니다.`)}`, `${t('Connect', '연결')}: /knock ${event.from}`))
+      void alert($, `🚪 ${t(`${event.from} knocked`, `${event.from} 님이 노크했습니다`)}`)
       return
     case 'left':
       await endChat($)
@@ -667,7 +715,7 @@ const SUBCOMMANDS = {
   random: () => t('Meet someone at random · /knock random [code]', '아무나 만나기 · /knock random [대기실 코드]'),
   next: () => t('Next random match', '다음 랜덤 상대 찾기'),
   block: () => t('Block someone · /knock block [name]', '차단하기 · /knock block [이름]'),
-  me: () => t('Your name, color and language', '내 이름, 색, 언어'),
+  me: () => t('Your name, color, language and alerts', '내 이름, 색, 언어, 알림'),
   off: () => t('End the chat', '대화 끝내기'),
   pic: () =>
     t('Pictures: /knock pic paste sends the copied one, /knock pic <file.png> a file; alone, see them', '사진: /knock pic paste 복사한 사진 보내기, /knock pic <파일.png> 파일 보내기, 그냥 입력하면 받은 사진 보기'),
@@ -675,20 +723,37 @@ const SUBCOMMANDS = {
 } as const
 const isSubcommand = (word: string): word is keyof typeof SUBCOMMANDS => Object.hasOwn(SUBCOMMANDS, word)
 
-// `/knock me [color [색] | name <이름> | lang <en|ko>]`: the person's own settings, in the menu's settings step.
+// `/knock me [color [색] | name <이름> | lang <en|ko> | alert <on|off>]`: the person's own settings, in the menu's settings step.
 async function settings($: $, args: string): Promise<string> {
   const [setting = '', ...rest] = args.trim().split(/\s+/)
   const value = rest.join(' ')
   if (setting === 'name' || setting === '이름') return value ? init($, value) : openMenu($, 'name')
   if (setting === 'color' || setting === '색') return value ? setColor($, value) : openMenu($, 'me')
   if (setting === 'lang' || setting === 'language' || setting === '언어') return value ? setLang($, value) : openMenu($, 'me')
+  if (setting === 'alert' || setting === 'alerts' || setting === '알림') return value ? setAlerts($, value) : openMenu($, 'me')
   if (setting) {
     return say(
       t(`No such setting: ${setting}`, `모르는 설정입니다: ${setting}`),
-      t('/knock me color <color> · /knock me name <name> · /knock me lang <en|ko>', '/knock me color <색> · /knock me name <이름> · /knock me lang <en|ko>'),
+      t(
+        '/knock me color <color> · /knock me name <name> · /knock me lang <en|ko> · /knock me alert <on|off>',
+        '/knock me color <색> · /knock me name <이름> · /knock me lang <en|ko> · /knock me alert <on|off>',
+      ),
     )
   }
   return openMenu($, 'me')
+}
+
+async function setAlerts($: $, value: string): Promise<string> {
+  const wanted = value.trim().toLowerCase()
+  const isOn = ['on', '켜기', '켬'].includes(wanted) ? true : ['off', '끄기', '끔'].includes(wanted) ? false : null
+  if (isOn === null) return t(`Pick on or off: /knock me alert off`, `on 또는 off로 정해 주세요: /knock me alert off`)
+  await $.store.set('alerts', isOn ? 'on' : 'off')
+  $.ui.invalidate('ui.render')
+  // Turned on, a knock to hear what it sounds like.
+  if (isOn) void $.audio.play(KNOCK_SOUND).catch(err => dbg($, `knock sound failed: ${err}`))
+  return isOn
+    ? t('Alerts on: a knock sound and a notification when someone connects, or writes after a quiet minute.', '알림을 켰습니다. 누가 연결되거나 1분 넘게 조용하다 말을 걸면 노크 소리와 알림으로 알려 드립니다.')
+    : t('Alerts off: no knock sound or notification.', '알림을 껐습니다. 노크 소리도 알림도 없습니다.')
 }
 
 const colorName = (key: ColorKey) => COLORS[key][lang]
@@ -1260,6 +1325,7 @@ async function turnPage($: $, page: number, focusKey: string) {
 
 // Closes the menu and runs what was picked in it, saying what came of it.
 async function act($: $, run: () => Promise<string>) {
+  activeAt = Date.now()
   await $.ui.close({ id: MENU_PANE }).catch(() => undefined)
   const shown = await withServer($, run)
   if (shown.text) notice($, shown.text)
@@ -1320,8 +1386,16 @@ async function completions($: $, words: string[]): Promise<PromptAutocompleteSug
     return starting(names.filter(name => name !== me)).map(name => ({ text: name, description: t('block', '차단') }))
   }
   if (words.length === 2 && first === 'me') {
-    const settingsOf = { color: t("your name's color", '이름 색'), name: t('change your name', '이름 바꾸기'), lang: t('language', '언어') }
+    const settingsOf = {
+      color: t("your name's color", '이름 색'),
+      name: t('change your name', '이름 바꾸기'),
+      lang: t('language', '언어'),
+      alert: t('knock sound and notification', '노크 소리와 알림'),
+    }
     return starting(Object.keys(settingsOf)).map(word => ({ text: word, description: settingsOf[word as keyof typeof settingsOf] }))
+  }
+  if (words.length === 3 && first === 'me' && second === 'alert') {
+    return starting(['on', 'off']).map(word => ({ text: word, description: word === 'on' ? t('alerts on', '알림 켜기') : t('alerts off', '알림 끄기') }))
   }
   if (words.length === 3 && first === 'me' && second === 'color') {
     return starting([...COLOR_KEYS.map(colorName), t('auto', '자동')]).map(label => ({ text: label, description: t("your name's color", '이름 색') }))
@@ -1453,10 +1527,12 @@ async function seek($: $, room: string, since?: number): Promise<string> {
   await $.state.set(CHAT, chat)
   await showStatus($, chat)
   startLoop($)
-  if (peer) return connectedText(peer, true)
+  if (peer) return connectedText(peer, true, typeof r.data?.waited === 'number' ? r.data.waited : 0)
   return say(
     `🎲 ${t(`Looking in ${lobbyOf(room)}.`, `${lobbyOf(room)}에서 상대를 찾는 중입니다.`)}`,
-    t('You connect as soon as someone comes', '누군가 들어오면 바로 연결됩니다'),
+    (await isAlerting($))
+      ? t('You connect as soon as someone comes, and a knock sounds to tell you', '누군가 들어오면 바로 연결되고, 노크 소리로 알려 드립니다')
+      : t('You connect as soon as someone comes', '누군가 들어오면 바로 연결됩니다'),
     !room && t('Only among people with a code: /knock random <code>', '코드를 아는 사람끼리만: /knock random <코드>'),
     t('Stop: /knock off', '그만 찾기: /knock off'),
   )
@@ -1715,7 +1791,7 @@ export const register: Register = on => {
       $.command.register({
         name: 'knock-me',
         description: 'Your settings',
-        argumentHint: '[color | name | lang]',
+        argumentHint: '[color | name | lang | alert]',
         immediate: true,
       }),
       $.command.register({ name: 'knock-off', description: 'End the chat', immediate: true }),
@@ -1746,6 +1822,7 @@ export const register: Register = on => {
   // Every command run, built-in or not, for the queued-command check below.
   on('command.run', ($, e, next) => {
     submissions++
+    activeAt = Date.now()
     return next(e)
   })
   on('command.run', { command: 'knock-init' }, ($, e) => answer($, () => init($, e.args)))
@@ -1918,6 +1995,7 @@ export const register: Register = on => {
       return list([...recentRows(menu.rooms, t('Enter to join', 'Enter로 들어가기'), value => room($, value)), back(false)], field, fieldHint)
     }
     if (menu.step === 'me') {
+      const isAlertOn = await isAlerting($)
       const color = colorFor(me, menu.color)
       const colorText = `${colorName(color)}${isColor(menu.color) ? '' : t(' (auto)', ' (자동)')}`
       const change = t('Enter to change', 'Enter로 바꾸기')
@@ -1939,6 +2017,13 @@ export const register: Register = on => {
           },
           { key: 'lang', hotkey: '2', label: `${t('Language', '언어')}: ${lang === 'ko' ? '한국어' : 'English'}`, hint: change, run: () => void goto($, 'lang') },
           { key: 'rename', hotkey: '3', label: `${t('Name', '이름')}: ${me}`, hint: change, run: () => void goto($, 'name') },
+          {
+            key: 'alerts',
+            hotkey: '4',
+            label: `${t('Alerts', '알림')}: ${isAlertOn ? t('knock sound and notification', '노크 소리와 알림') : t('off', '끔')}`,
+            hint: isAlertOn ? t('Enter to turn off', 'Enter로 끄기') : t('Enter to turn on', 'Enter로 켜기'),
+            run: () => void setAlerts($, isAlertOn ? 'off' : 'on').then(text => notice($, text)),
+          },
           back(true),
         ],
         null,
@@ -2003,7 +2088,7 @@ export const register: Register = on => {
         ...(pictures.length
           ? [{ key: 'pictures', label: t(`See the pictures (${pictures.length})`, `받은 사진 보기 (${pictures.length})`), run: () => void act($, () => openViewer($)) }]
           : []),
-        { key: 'me', label: t('Settings: color, language, name', '내 설정: 색, 언어, 이름'), run: () => void goto($, 'me') },
+        { key: 'me', label: t('Settings: color, language, name, alerts', '내 설정: 색, 언어, 이름, 알림'), run: () => void goto($, 'me') },
         ...(chat
           ? [{
               key: 'off',
@@ -2155,6 +2240,7 @@ export const register: Register = on => {
   // the turn it starts is answered by the peer, not the model.
   on('prompt.submit', async ($, e, next) => {
     submissions++
+    activeAt = Date.now()
     if (e.command || e.isMeta || e.origin.kind !== 'composer') return next(e)
     const { value: chat } = await $.state.get(CHAT)
     if (!chat?.isConnected) {

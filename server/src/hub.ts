@@ -136,12 +136,13 @@ export class Hub extends DurableObject<Env> {
     return ok({ state: 'waiting', peer: to, isNotified: this.isListening(to) })
   }
 
-  // Matches this window with whoever has waited longest in `room`, or leaves it waiting there.
+  // Matches this window with whoever has waited longest in `room` (saying how long, in ms), or leaves
+  // it waiting there.
   async random(
     token: string,
     window: string,
     room: string,
-  ): Promise<Result<{ state: 'connected'; peer: string } | { state: 'waiting'; online: number }>> {
+  ): Promise<Result<{ state: 'connected'; peer: string; waited: number } | { state: 'waiting'; online: number }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     if (!ROOM.test(room)) return fail(400, 'room must be up to 32 characters, with no spaces')
@@ -162,8 +163,9 @@ export class Hub extends DurableObject<Env> {
       )
       .sort(([, a], [, b]) => a.seekingAt - b.seekingAt)
     if (match) {
+      const waited = Date.now() - match[1].seekingAt
       this.pair(me, match[0], true)
-      return ok({ state: 'connected', peer: match[0] })
+      return ok({ state: 'connected', peer: match[0], waited })
     }
     live.seeking = room
     live.seekingAt = Date.now()

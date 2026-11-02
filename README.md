@@ -41,7 +41,7 @@ Already know your way? `/knock bob` knocks on bob at once, and `/knock off` leav
 | `/knock next` | Leave this random match and find the next one |
 | `/knock room [room]` | Join a group room, up to 8 people. Alone, it shows who's in your room |
 | `/knock block [name]` | Block the person you're chatting with, or a name |
-| `/knock me` | Your settings: your name's color (with a preview), your name, and the language. `/knock me color blue`, `/knock me name <name>` and `/knock me lang ko` do it directly |
+| `/knock me` | Your settings: your name's color (with a preview), your name, the language and alerts. `/knock me color blue`, `/knock me name <name>`, `/knock me lang ko` and `/knock me alert off` do it directly |
 | `/knock pic paste` | Send the picture you copied (macOS) to the chat or room |
 | `/knock pic <file.png>` | Send a PNG file instead. `/knock pic` alone shows the pictures you got |
 | `/knock off` | Leave the chat or room (or stop looking) and go back to Claude |
@@ -54,6 +54,7 @@ The older `/knock-room`-style commands still work, out of the typeahead.
 - **A knock only notifies your friend if they have a knock window open.** knock tells you when it didn't, so you can ping them yourself.
 - **The spinner keeps running while you're connected.** It's waiting for your friend's reply.
 - **The chat stays in that window's Claude history.** Chat in a fresh window, not the one you're working in.
+- **knock knocks when someone connects.** A random match, a friend knocking back or someone coming into a room you had to yourself plays a knock sound (macOS) and sends a notification. So does a message after a quiet minute, in case you looked away. `/knock me alert off` turns both off.
 - **Closed the window by mistake?** Your friend waits 10 minutes for you. Open `/knock` in a new window and press Enter on the top row.
 - **knock speaks English, or Korean.** English is the default. Pick 한국어 on the first screen of `/knock` or in `/knock me`, or type `/knock me lang ko`. It applies to every window on this computer.
 
@@ -123,6 +124,7 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 
 - `/knock random` alone is the open lobby, for everyone. `/knock random <code>` is a lobby of its own, so only people who type the same code meet. Use one for a team or a community.
 - The person who has waited longest gets matched first.
+- When you're matched, a knock sounds, so you can wait in another window. If the one you meet waited 3 minutes or more, knock tells you they may be away for now.
 - While you wait, a line above the prompt spins and shows how long you've waited and how many others are on knock right now.
 - `/knock` shows, next to **Meet someone at random**, how many are waiting in the open lobby. If someone is, you connect at once.
 - `/knock next` moves on. You won't get the person you just left again right away.
