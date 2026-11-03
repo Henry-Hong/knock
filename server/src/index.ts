@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono'
 import { createMiddleware } from 'hono/factory'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 
-import type { Result } from './hub'
+import { PHOTO_FORMATS, type PhotoFormat, type Result } from './hub'
 
 export { Hub } from './hub'
 
@@ -79,6 +79,52 @@ app.post('/pic', perUser, async c => {
   return reply(c, await hub(c).picture(token(c), str(window), str(png)))
 })
 
+// A photo is a picture file as it is, up to what a Worker takes in one request. Its bytes stream
+// straight into R2 and never reach the Hub, which only tells the chat its id.
+const PHOTO_MAX = 100 * 1000 * 1000
+const MIME: Record<PhotoFormat, string> = {
+  png: 'image/png',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  heic: 'image/heic',
+}
+const PHOTO_ID = /^[0-9a-f]{32}$/
+const side = (v: string | undefined) => Math.max(0, Math.min(1_000_000, Math.floor(Number(v) || 0)))
+
+app.post('/photo', perUser, async c => {
+  const window = c.req.query('window') ?? ''
+  const format = c.req.query('format') as PhotoFormat
+  if (!PHOTO_FORMATS.includes(format)) return c.json({ error: `a photo is one of ${PHOTO_FORMATS.join(', ')}` }, 400)
+  const size = Number(c.req.header('content-length'))
+  if (!size || !c.req.raw.body) return c.json({ error: 'a photo needs its length' }, 411)
+  if (size > PHOTO_MAX) return c.json({ error: 'a photo is up to 100 MB' }, 413)
+  const start = await hub(c).photoStart(token(c), window)
+  if (!start.ok) return reply(c, start)
+  const id = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('')
+  await c.env.PHOTOS.put(id, c.req.raw.body, {
+    httpMetadata: { contentType: MIME[format] },
+    customMetadata: { from: start.data.from, to: start.data.to.join(' ') },
+  })
+  const photo = { id, format, size, width: side(c.req.query('width')), height: side(c.req.query('height')) }
+  const sent = await hub(c).photoSent(token(c), window, photo, start.data.to)
+  return sent.ok ? c.json({ ...photo, to: sent.data.to }) : reply(c, sent)
+})
+
+// Only its sender and those it was sent to get a photo; to anyone else it is not there.
+app.get('/photo/:id', perUser, async c => {
+  const id = c.req.param('id')
+  const me = PHOTO_ID.test(id) ? await hub(c).whoIs(token(c)) : null
+  const photo = me ? await c.env.PHOTOS.get(id) : null
+  const meta = photo?.customMetadata ?? {}
+  if (!photo || (meta.from !== me && !(meta.to ?? '').split(' ').includes(me!))) {
+    return c.json({ error: 'no such photo: it may be over a day old' }, 404)
+  }
+  return new Response(photo.body, {
+    headers: { 'content-type': photo.httpMetadata?.contentType ?? 'application/octet-stream', 'content-length': String(photo.size) },
+  })
+})
+
 app.post('/leave', perUser, async c => {
   const { window, closed } = await body(c)
   return reply(c, await hub(c).leave(token(c), str(window), closed === true))
@@ -86,7 +132,8 @@ app.post('/leave', perUser, async c => {
 
 app.get('/poll', async c => {
   const hold = Number(c.req.query('hold'))
-  return reply(c, await hub(c).poll(token(c), c.req.query('window') ?? '', Number.isFinite(hold) ? hold : undefined))
+  const canPhoto = c.req.query('photos') === '1'
+  return reply(c, await hub(c).poll(token(c), c.req.query('window') ?? '', Number.isFinite(hold) ? hold : undefined, canPhoto))
 })
 
 export default app

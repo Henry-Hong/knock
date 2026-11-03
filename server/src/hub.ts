@@ -17,10 +17,16 @@ const ROOM = /^[^\s\p{Cc}]{0,32}$/u
 const GROUP_MAX = 8
 // How long /knock next keeps the one moved on from out of the mover's random matches, both ways.
 const SKIP_MS = 60_000
+// What a window from before photos hears for one.
+const OLD_PHOTO_TEXT = '📷 sent a photo: update knock to see it · 사진을 보냈습니다: 보려면 knock을 업데이트하세요'
 // A picture is a whole PNG, base64, up to 4 MiB decoded (what a mod's $.fs.read reads); a few a minute.
 const PNG_MAX = Math.ceil((4 * 1024 * 1024) / 3) * 4
 const PNG_HEAD = 'iVBORw0KGgo'
 const PICTURES_PER_MINUTE = 6
+// A photo is any picture file as it is, its bytes in R2 (index.ts): the Hub only passes its id on.
+export const PHOTO_FORMATS = ['png', 'jpeg', 'gif', 'webp', 'heic'] as const
+export type PhotoFormat = (typeof PHOTO_FORMATS)[number]
+export type Photo = { id: string; format: PhotoFormat; size: number; width: number; height: number }
 // Who used knock lately: when each user was last heard from is written down at most this often.
 const SEEN_WRITE_MS = 5 * 60_000
 const DAY_MS = 24 * 60 * 60_000
@@ -37,6 +43,8 @@ export type KnockEvent =
   | { type: 'left'; peer: string; reason: 'left' | 'closed' | 'timeout' }
   // A picture, as `message` is said: `png` the whole file, base64.
   | { type: 'picture'; from: string; png: string; at: number; group?: string }
+  // A photo, its bytes at GET /photo/:id for `from` and whoever it was sent to.
+  | ({ type: 'photo'; from: string; at: number; group?: string } & Photo)
   // Someone came into or went out of this window's group room; count is how many are in it now.
   | { type: 'joined'; name: string; count: number }
   | { type: 'departed'; name: string; count: number; reason: 'left' | 'timeout' }
@@ -60,6 +68,8 @@ type Live = {
   queue: KnockEvent[]
   waiter: ((events: KnockEvent[]) => void) | null
   seenAt: number
+  // The window polls as a knock that shows photos; one from before them is told to update.
+  canPhoto: boolean
 }
 
 const ok = <T>(data: T): Result<T> => ({ ok: true, data })
@@ -260,6 +270,7 @@ export class Hub extends DurableObject<Env> {
   }
 
   // Hands a picture on as `send` hands text: to the peer, or the rest of the room. Nothing keeps it.
+  // From a knock before photos; a newer one sends a photo.
   async picture(token: string, window: string, png: string): Promise<Result<{ to: string[] }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
@@ -267,19 +278,47 @@ export class Hub extends DurableObject<Env> {
     if (!live || live.window !== window || !(live.peer || live.group)) return fail(409, 'not connected')
     if (!png.startsWith(PNG_HEAD)) return fail(400, 'a picture must be a PNG')
     if (png.length > PNG_MAX) return fail(400, 'a picture is up to 4 MB')
-    const now = Date.now()
-    const recent = (this.sentPictures.get(me) ?? []).filter(at => now - at < 60_000)
-    if (recent.length >= PICTURES_PER_MINUTE) return fail(409, `up to ${PICTURES_PER_MINUTE} pictures a minute`)
-    this.sentPictures.set(me, [...recent, now])
-    if (live.peer) {
-      this.push(live.peer, { type: 'picture', from: me, png, at: now })
-      return ok({ to: [live.peer] })
-    }
-    const group = live.group!
-    const blocked = this.blocked(me)
-    const to = [...(this.groups.get(group) ?? [])].filter(name => name !== me && !blocked.has(name))
-    for (const name of to) this.push(name, { type: 'picture', from: me, png, at: now, group })
+    if (!this.takePictureTurn(me)) return fail(409, `up to ${PICTURES_PER_MINUTE} pictures a minute`)
+    const at = Date.now()
+    const group = live.group ?? undefined
+    const to = this.recipientsOf(me, live)
+    for (const name of to) this.push(name, { type: 'picture', from: me, png, at, group })
     return ok({ to })
+  }
+
+  // Before a photo's bytes go up: who sends it and who it is for, counted against the pictures a
+  // minute. The Worker keeps both with the bytes, so only they may fetch it.
+  async photoStart(token: string, window: string): Promise<Result<{ from: string; to: string[] }>> {
+    const me = await this.auth(token)
+    if (!me) return fail(401, 'unknown token')
+    const live = this.live.get(me)
+    if (!live || live.window !== window || !(live.peer || live.group)) return fail(409, 'not connected')
+    const to = this.recipientsOf(me, live)
+    if (!to.length) return fail(409, 'no one to send it to')
+    if (!this.takePictureTurn(me)) return fail(409, `up to ${PICTURES_PER_MINUTE} pictures a minute`)
+    return ok({ from: me, to })
+  }
+
+  // Once a photo's bytes are up: tells those it was for who are still here. A window from before
+  // photos hears a line instead, as it cannot show one.
+  async photoSent(token: string, window: string, photo: Photo, to: string[]): Promise<Result<{ to: string[] }>> {
+    const me = await this.auth(token)
+    if (!me) return fail(401, 'unknown token')
+    const live = this.live.get(me)
+    if (!live || live.window !== window || !(live.peer || live.group)) return fail(409, 'not connected')
+    const at = Date.now()
+    const group = live.group ?? undefined
+    const reached = this.recipientsOf(me, live).filter(name => to.includes(name))
+    for (const name of reached) {
+      if (this.live.get(name)?.canPhoto) this.push(name, { type: 'photo', from: me, at, group, ...photo })
+      else this.push(name, { type: 'message', from: me, text: OLD_PHOTO_TEXT, at, group })
+    }
+    return ok({ to: reached })
+  }
+
+  // Who holds `token`, for the Worker to tell whether they may fetch a photo.
+  async whoIs(token: string): Promise<string | null> {
+    return this.auth(token)
   }
 
   // Hands `text` to the peer, or to everyone else in the group room but those blocked either way.
@@ -320,7 +359,12 @@ export class Hub extends DurableObject<Env> {
   }
 
   // A poll's answer also says how many are on knock, for a window waiting in a lobby to show.
-  async poll(token: string, window: string, holdMs = POLL_HOLD_MS): Promise<Result<{ events: KnockEvent[]; online: number }>> {
+  async poll(
+    token: string,
+    window: string,
+    holdMs = POLL_HOLD_MS,
+    canPhoto = false,
+  ): Promise<Result<{ events: KnockEvent[]; online: number }>> {
     const me = await this.auth(token)
     if (!me) return fail(401, 'unknown token')
     this.sweep()
@@ -329,6 +373,7 @@ export class Hub extends DurableObject<Env> {
     if (live.window !== window) return ok({ events: [{ type: 'replaced' }], online: this.live.size })
 
     live.seenAt = Date.now()
+    live.canPhoto = canPhoto
     if (live.queue.length) return ok({ events: live.queue.splice(0), online: this.live.size })
 
     live.waiter?.([])
@@ -412,9 +457,27 @@ export class Hub extends DurableObject<Env> {
       queue: [],
       waiter: null,
       seenAt: Date.now(),
+      canPhoto: false,
     }
     this.live.set(name, fresh)
     return fresh
+  }
+
+  // Who hears what `me` says now: the peer, or the rest of the room but those blocked either way.
+  private recipientsOf(me: string, live: Live): string[] {
+    if (live.peer) return [live.peer]
+    if (!live.group) return []
+    const blocked = this.blocked(me)
+    return [...(this.groups.get(live.group) ?? [])].filter(name => name !== me && !blocked.has(name))
+  }
+
+  // One more picture or photo from `me` this minute, if they have not sent too many.
+  private takePictureTurn(me: string): boolean {
+    const now = Date.now()
+    const recent = (this.sentPictures.get(me) ?? []).filter(at => now - at < 60_000)
+    if (recent.length >= PICTURES_PER_MINUTE) return false
+    this.sentPictures.set(me, [...recent, now])
+    return true
   }
 
   // Connects `a` and `b`; `b` hears it, `a` learns it from its own request's reply.

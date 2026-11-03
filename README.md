@@ -43,7 +43,7 @@ Already know your way? `/knock bob` knocks on bob at once, and `/knock off` leav
 | `/knock block [name]` | Block the person you're chatting with, or a name |
 | `/knock me` | Your settings: your name's color (with a preview), your name, the language and alerts. `/knock me color blue`, `/knock me name <name>`, `/knock me lang ko` and `/knock me alert off` do it directly |
 | `/knock pic paste` | Send the picture you copied (macOS) to the chat or room |
-| `/knock pic <file.png>` | Send a PNG file instead. `/knock pic` alone shows the pictures you got |
+| `/knock pic <file>` | Send a picture file instead (PNG, JPEG, GIF, WebP, HEIC). `/knock pic` alone shows the pictures you got |
 | `/knock off` | Leave the chat or room (or stop looking) and go back to Claude |
 | `/knock star` | Star knock on GitHub with your `gh` account, or open its page without `gh`. knock asks about this once, in a line above the prompt, once a chat has gone back and forth a while |
 
@@ -157,15 +157,16 @@ The chat stays in that window's history. If you talk to Claude in the same windo
 <details>
 <summary><b>Pictures</b></summary>
 
-In a chat or a room, copy a picture and type `/knock pic paste`. ⌘⌃⇧4 captures a part of the screen straight to the clipboard; a picture copied in a browser, Finder or Preview works too, JPEG included. Or send a PNG file: `/knock pic ~/shots/shot.png` (paste the path or drag the file in; quotes and spaces are fine).
+In a chat or a room, paste a picture into the prompt or drop picture files on it, as you would for Claude, and press Enter: they go to the chat with whatever you typed. A dropped file goes as it is; a pasted picture as Claude Code holds it, which may be shrunk. Or copy a picture and type `/knock pic paste` for the clipboard's own. ⌘⌃⇧4 captures a part of the screen straight to the clipboard; a picture copied in a browser, Finder or Preview works too, JPEG included. Or send a picture file: `/knock pic ~/shots/shot.png` (paste the path or drag the file in; quotes and spaces are fine).
 
 ```
 ⏺ bob 📷 sent a picture · see it: /knock pic
 ```
 
-- `/knock pic` opens a viewer with the latest pictures, newest first: `o` older, `n` newer, `Esc` closes.
-- The viewer draws the picture in colored blocks, which works in any terminal. Press `g` for the sharp picture where the terminal can draw one (iTerm2 3.5 and later, Ghostty, kitty; up to 2 MB). Other terminals, Orca or Apple's Terminal among them, don't get the `g`.
-- A file must be a PNG (a screenshot is one), up to 4 MB; a pasted picture is turned into a PNG and shrunk to fit. 6 a minute. The server passes pictures on and keeps none.
+- `/knock pic` opens a viewer with the latest pictures, newest first: `o` older, `n` newer, `f` opens the file (in Preview on macOS), `Esc` closes.
+- In a terminal that draws pictures (iTerm2 3.5 and later, Ghostty, kitty) the viewer opens on the sharp picture; `g` switches to colored blocks and back. Other terminals, Orca or Apple's Terminal among them, get the blocks, which work anywhere.
+- A picture goes as it is, up to 100 MB: PNG, JPEG, GIF, WebP or HEIC. 6 a minute. Turning HEIC and the rest into what the terminal draws takes macOS (`sips`); elsewhere a PNG shows, and `f` opens the others.
+- Pictures are kept for a day on Cloudflare R2 for the people they were sent to, then deleted. Only the sender and those in the chat or room when it was sent can get one.
 - `/knock` lists **Send the picture you copied** while you're in a chat, and **See the pictures** once you have some.
 - A picture from someone met at random says so: open it only if you trust them.
 - Pasting into the prompt with ctrl+v doesn't send it: Claude Code keeps pasted images from plugins. Copy, then `/knock pic paste`.
@@ -206,7 +207,7 @@ Start a line with `@claude` in a chat or a room, and Claude answers everyone:
 The default server is `https://knock.everwish.workers.dev`. It runs on Cloudflare Workers with a single Durable Object.
 
 - Accounts store only a name and a hash of its token. The token itself stays on your computer.
-- Messages are relayed, never stored.
+- Messages are relayed, never stored. Pictures are kept for a day for those they were sent to, then deleted.
 - `GET /stats` tells how many people are on knock right now (in a chat, knocking, waiting in a lobby or in a room) and how many used it in the last 24 hours: counts only, no names. For that count, the server keeps when each name last used knock.
 - Rate limits, per minute: 5 sign-ups per IP, 60 knocks or messages per person, 300 requests per IP.
 

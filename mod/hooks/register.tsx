@@ -1,7 +1,7 @@
 import { update } from 'claude-code'
-import type { EngineInterface, PromptAutocompleteSuggestion, Register } from 'claude-code'
+import type { EngineInterface, PromptAutocompleteSuggestion, PromptSubmitAttachment, Register } from 'claude-code'
 
-import type { Chat, KnockEvent, Menu, MenuStep } from '../types'
+import type { Chat, KnockEvent, Menu, MenuStep, PhotoFormat } from '../types'
 
 type $ = EngineInterface
 type Reply = { status: number; data: Record<string, unknown> | null }
@@ -71,8 +71,26 @@ let isInboxTurnQueued = false // a 📨 turn is already on its way to show the i
 let inbox: Message[] = []
 let recent: { from: string; text: string }[] = [] // the chat's last lines, which @claude reads
 let isAsking = false // an @claude question is out
-// The pictures sent and received lately, newest first: their bytes stay here, out of $.state.
-type Picture = { from: string; png: string; at: number; width: number; height: number; isStranger: boolean; thumb?: Thumb | null }
+// The pictures sent and received lately, newest first, out of $.state. A photo's bytes are files
+// in the photo folder (original, then the PNGs drawn of it); a picture from a knock before photos
+// is its PNG here, base64.
+type Picture = {
+  from: string
+  at: number
+  width: number
+  height: number
+  isStranger: boolean
+  png?: string
+  id?: string
+  format?: PhotoFormat
+  size?: number
+  original?: string
+  // What the sharp view draws, a PNG at most VIEW_SIDE pixels long; null when none could be made.
+  view?: string | null
+  // 'loading' while it comes down; 'failed' when it could not.
+  state?: 'loading' | 'ready' | 'failed'
+  thumb?: Thumb | null
+}
 let pictures: Picture[] = []
 let stopWaiting: (() => void) | null = null
 let activeAt = 0 // when the person last typed or ran a command here
@@ -106,7 +124,8 @@ async function api($: $, method: 'GET' | 'POST', path: string, body?: object): P
 
 // Each answer also says how many are on knock, which the lobby band shows.
 async function poll($: $, holdMs: number) {
-  const r = await api($, 'GET', `/poll?window=${encodeURIComponent(await $.session.id())}&hold=${holdMs}`)
+  // photos=1: this knock shows photos, so the server sends them rather than a line to update.
+  const r = await api($, 'GET', `/poll?window=${encodeURIComponent(await $.session.id())}&hold=${holdMs}&photos=1`)
   if (typeof r.data?.online === 'number') await $.state.set(ONLINE, r.data.online)
   return r
 }
@@ -412,17 +431,30 @@ async function take($: $, events: KnockEvent[]) {
     } else if (event.type === 'picture') {
       const { value: chat } = await $.state.get(CHAT)
       const isStranger = !!chat?.isRandom
-      await keepPicture($, { from: event.from, png: event.png, at: event.at, isStranger })
+      await keepPicture($, { from: event.from, png: event.png, at: event.at, isStranger, ...sizeOf(event.png) })
       const text = isStranger
         ? t("📷 sent a picture · a stranger's: see it only if you trust them: /knock pic", '📷 사진을 보냈습니다 · 모르는 사람의 사진이니 믿을 때만 보세요: /knock pic')
         : t('📷 sent a picture · see it: /knock pic', '📷 사진을 보냈습니다 · 보기: /knock pic')
       remember(event.from, '(a picture)')
       inbox.push({ type: 'message', from: event.from, text, at: event.at, group: event.group })
+    } else if (event.type === 'photo') {
+      const { value: chat } = await $.state.get(CHAT)
+      const isStranger = !!chat?.isRandom
+      const { type: _, group, ...photo } = event
+      const shown: Picture = { ...photo, isStranger, state: 'loading' }
+      await keepPicture($, shown)
+      void fetchPhoto($, shown).catch(err => dbg($, `photo fetch failed: ${err}`))
+      const about = aboutOf(shown)
+      const text = isStranger
+        ? t(`📷 sent a photo (${about}) · a stranger's: see it only if you trust them: /knock pic`, `📷 사진을 보냈습니다 (${about}) · 모르는 사람의 사진이니 믿을 때만 보세요: /knock pic`)
+        : t(`📷 sent a photo (${about}) · see it: /knock pic`, `📷 사진을 보냈습니다 (${about}) · 보기: /knock pic`)
+      remember(event.from, '(a picture)')
+      inbox.push({ type: 'message', from: event.from, text, at: event.at, group })
     } else await onEvent($, event)
   }
   if (events.some(event => event.type === 'message')) void offerStar($).catch(err => dbg($, `star offer failed: ${err}`))
   // The first word after a quiet while, from either side, may come to a window no one watches.
-  const [first] = events.filter(event => event.type === 'message' || event.type === 'picture')
+  const [first] = events.filter(event => event.type === 'message' || event.type === 'picture' || event.type === 'photo')
   if (first) {
     const now = Date.now()
     if (now - Math.max(heardAt, activeAt) < QUIET_MS) heardAt = now
@@ -718,7 +750,7 @@ const SUBCOMMANDS = {
   me: () => t('Your name, color, language and alerts', '내 이름, 색, 언어, 알림'),
   off: () => t('End the chat', '대화 끝내기'),
   pic: () =>
-    t('Pictures: /knock pic paste sends the copied one, /knock pic <file.png> a file; alone, see them', '사진: /knock pic paste 복사한 사진 보내기, /knock pic <파일.png> 파일 보내기, 그냥 입력하면 받은 사진 보기'),
+    t('Pictures: /knock pic paste sends the copied one, /knock pic <file> a picture file; alone, see them', '사진: /knock pic paste 복사한 사진 보내기, /knock pic <파일> 사진 파일 보내기, 그냥 입력하면 받은 사진 보기'),
   star: () => t('Star knock on GitHub', 'GitHub에서 knock에 스타 남기기'),
 } as const
 const isSubcommand = (word: string): word is keyof typeof SUBCOMMANDS => Object.hasOwn(SUBCOMMANDS, word)
@@ -819,10 +851,8 @@ async function noteLast($: $, chat: Chat | null | undefined) {
 // How long ago, from minutes.
 const agoOf = (minutes: number) => (minutes < 1 ? t('just now', '방금') : t(`${minutes} min ago`, `${minutes}분 전`))
 
-// A picture is a whole PNG, base64, up to 4 MiB decoded (what $.fs.read reads at once), as the server
-// takes it. The sharp view draws one up to 2 MiB; the block view, any size.
-const PNG_HEAD = 'iVBORw0KGgo'
-const PNG_MAX = Math.ceil((4 * 1024 * 1024) / 3) * 4
+// A picture from a knock before photos is a whole PNG, base64: the sharp view draws one up to 2 MiB,
+// the block view any size.
 const SHARP_MAX = Math.ceil((2 * 1024 * 1024) / 3) * 4
 const PICTURE_PANE = 'knock-pic'
 
@@ -1083,9 +1113,14 @@ function base64Of(bytes: Uint8Array) {
 // iTerm2, and in tmux with passthrough on. A terminal that names itself as anything else cannot,
 // so the viewer offers only the blocks there; one that names nothing gets the benefit of the doubt.
 async function canDrawSharp($: $) {
+  return !(await $.env.get('TERM_PROGRAM')) || (await isSharpTerminal($))
+}
+
+// A terminal that names itself as one that draws sharp pictures: the viewer opens on the sharp view.
+async function isSharpTerminal($: $) {
   const program = (await $.env.get('TERM_PROGRAM')) ?? ''
   const term = (await $.env.get('TERM')) ?? ''
-  return !program || ['iTerm.app', 'ghostty', 'kitty', 'tmux'].includes(program) || term.includes('kitty')
+  return ['iTerm.app', 'ghostty', 'kitty', 'tmux'].includes(program) || term.includes('kitty')
 }
 
 function cellsOf(thumb: Thumb, columns: number, rows: number) {
@@ -1114,10 +1149,257 @@ function sizeOf(png: string): { width: number; height: number } {
   return { width: at(16) || 1, height: at(20) || 1 }
 }
 
-async function keepPicture($: $, picture: Omit<Picture, 'width' | 'height'>) {
-  pictures = [{ ...picture, ...sizeOf(picture.png) }, ...pictures].slice(0, 10)
+// Keeps the latest 10; the files of one that drops off go with it.
+async function keepPicture($: $, picture: Picture) {
+  const dropped = [picture, ...pictures].slice(10)
+  pictures = [picture, ...pictures].slice(0, 10)
+  for (const old of dropped) void removePhotoFiles($, old)
   // A viewer open on the newest moves to this one; one on an older keeps its picture.
-  await update($, VIEWER, viewer => (viewer ? { index: viewer.index ? viewer.index + 1 : 0, seq: viewer.seq + 1 } : null))
+  await update($, VIEWER, viewer => (viewer ? { ...viewer, index: viewer.index ? viewer.index + 1 : 0, seq: viewer.seq + 1 } : null))
+}
+
+// A picture's change of state shows in an open viewer.
+const redrawViewer = ($: $) => update($, VIEWER, viewer => (viewer ? { ...viewer, seq: viewer.seq + 1 } : null))
+
+// A photo is any picture file as it is, up to 100 MB (what the server takes). curl carries it up and
+// down, as $.fs.read and $.http.fetch hold 4 MiB and text; on macOS sips draws PNGs of it to show.
+const PHOTO_MAX = 100 * 1000 * 1000
+const MIME: Record<PhotoFormat, string> = {
+  png: 'image/png',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  heic: 'image/heic',
+}
+const EXT: Record<PhotoFormat, string> = { png: 'png', jpeg: 'jpg', gif: 'gif', webp: 'webp', heic: 'heic' }
+// The sharp view draws a PNG of a photo this many pixels on its long side at most.
+const VIEW_SIDE = 2560
+const THUMB_SIDE = 240
+const FS_READ_MAX = 4 * 1024 * 1024
+
+const mbOf = (bytes: number) => (bytes < 1_000_000 ? `${Math.max(1, Math.round(bytes / 1000))} KB` : `${(bytes / 1_000_000).toFixed(1)} MB`)
+const aboutOf = (p: Picture) => [p.width && p.height ? `${p.width}×${p.height}` : '', p.size ? mbOf(p.size) : ''].filter(Boolean).join(' · ')
+
+let system: string | null = null
+async function isMac($: $) {
+  system ??= (await $.process.run(['uname']).catch(() => ({ stdout: '' }))).stdout.trim()
+  return system === 'Darwin'
+}
+
+// The folder a window keeps its photos' files in, under the temp folder (macOS guards Desktop,
+// Documents and Downloads, not it). Files over a day old are cleared at a session's start.
+async function photoDir($: $) {
+  const dir = `${((await $.env.get('TMPDIR')) ?? '/tmp/').replace(/\/?$/, '/')}knock-photos`
+  await $.process.run(['mkdir', '-p', dir])
+  return dir
+}
+
+async function removePhotoFiles($: $, p: Picture) {
+  const files = [p.original, p.view].filter((f): f is string => !!f && f.includes('/knock-photos/'))
+  if (files.length) await $.process.run(['rm', '-f', ...files]).catch(() => undefined)
+}
+
+// What format a file's first bytes say it is, or null for one knock does not send.
+function formatOf(head: Uint8Array): PhotoFormat | null {
+  const text = (from: number, to: number) => String.fromCharCode(...head.subarray(from, to))
+  if (head[0] === 0x89 && text(1, 4) === 'PNG') return 'png'
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'jpeg'
+  if (text(0, 4) === 'GIF8') return 'gif'
+  if (text(0, 4) === 'RIFF' && text(8, 12) === 'WEBP') return 'webp'
+  if (text(4, 8) === 'ftyp' && ['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'mif1', 'msf1'].includes(text(8, 12))) return 'heic'
+  return null
+}
+
+// A file's format, size and pixels across and down (0 where they cannot be told). Rejects with the
+// shell's words when the file cannot be read, which `unreadable` turns into what to do.
+async function probe($: $, path: string): Promise<{ format: PhotoFormat | null; size: number; width: number; height: number }> {
+  const r = await $.process.run(['sh', '-c', 'wc -c < "$1" && head -c 32 "$1" | base64', 'sh', path])
+  if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `could not read ${path}`)
+  const [size = '0', ...rest] = r.stdout.trim().split('\n')
+  const head = Uint8Array.from(atob(rest.join('').replace(/\s/g, '')), ch => ch.charCodeAt(0))
+  const format = formatOf(head)
+  const at = (i: number) => ((head[i]! << 24) | (head[i + 1]! << 16) | (head[i + 2]! << 8) | head[i + 3]!) >>> 0
+  let width = 0
+  let height = 0
+  if (format === 'png') [width, height] = [at(16), at(20)]
+  else if (format === 'gif') [width, height] = [head[6]! | (head[7]! << 8), head[8]! | (head[9]! << 8)]
+  else if (format && (await isMac($))) {
+    const sips = await $.process.run(['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', path]).catch(() => null)
+    width = Number(/pixelWidth: (\d+)/.exec(sips?.stdout ?? '')?.[1] ?? 0)
+    height = Number(/pixelHeight: (\d+)/.exec(sips?.stdout ?? '')?.[1] ?? 0)
+  }
+  return { format, size: Number(size.trim()) || 0, width, height }
+}
+
+// curl to the knock server with this window's token, read from stdin so no process list shows it.
+// `args` say where and what; the reply's body is stdout unless `-o` sends it to a file.
+async function curl($: $, args: string[]): Promise<Reply> {
+  const server = await serverOf($)
+  const { value: me } = await $.state.get(ME)
+  const token = me ? (await accountsOf($, server))[me] : undefined
+  const last = args.length - 1
+  const url = server + args[last]!
+  const r = await $.process.run(['curl', '-sS', '-H', '@-', '-w', '\n%{http_code}', ...args.slice(0, last), url], {
+    stdin: token ? `authorization: Bearer ${token}\n` : '',
+    timeoutMs: 10 * 60_000,
+  })
+  if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `curl exited with ${r.exitCode}`)
+  const lines = r.stdout.split('\n')
+  const status = Number(lines.pop())
+  let data: Reply['data'] = null
+  try {
+    data = JSON.parse(lines.join('\n'))
+  } catch {}
+  return { status, data }
+}
+
+// Brings a photo down into the photo folder, then draws what the viewer shows of it.
+async function fetchPhoto($: $, p: Picture) {
+  const file = `${await photoDir($)}/${p.id}.${EXT[p.format!]}`
+  const r = await curl($, ['-o', file, `/photo/${p.id}`]).catch(() => null)
+  if (r?.status !== 200) {
+    p.state = 'failed'
+    await $.process.run(['rm', '-f', file]).catch(() => undefined)
+  } else {
+    p.original = file
+    await drawPhoto($, p)
+  }
+  await redrawViewer($)
+}
+
+// The PNGs a photo is shown as: on macOS sips draws the sharp view's (at most VIEW_SIDE long) and
+// the block view's thumbnail from any format. Elsewhere a PNG is drawn as it is, the rest not at all.
+async function drawPhoto($: $, p: Picture) {
+  const original = p.original!
+  const base = original.replace(/\.[^./]+$/, '')
+  const long = Math.max(p.width, p.height)
+  const shrink = (side: number) => (!long || long > side ? ['-Z', String(side)] : [])
+  p.view = null
+  p.thumb = null
+  try {
+    if (await isMac($)) {
+      const view = `${base}.view.png`
+      const thumb = `${base}.thumb.png`
+      const made = await $.process.run(['sips', '-s', 'format', 'png', ...shrink(VIEW_SIDE), original, '--out', view], { timeoutMs: 60_000 })
+      if (made.exitCode === 0) {
+        p.view = view
+        if (!p.width || !p.height) Object.assign(p, await probe($, view).then(({ width, height }) => ({ width, height })))
+        await $.process.run(['sips', '-s', 'format', 'png', ...shrink(THUMB_SIDE), view, '--out', thumb], { timeoutMs: 60_000 })
+        p.thumb = thumbOf((await $.fs.read(thumb, { as: 'bytes' })).base64, THUMB_SIDE)
+        await $.process.run(['rm', '-f', thumb])
+      }
+    } else if (p.format === 'png') {
+      p.view = original
+      if ((p.size ?? Infinity) <= FS_READ_MAX) p.thumb = thumbOf((await $.fs.read(original, { as: 'bytes' })).base64, THUMB_SIDE)
+    }
+  } catch (err) {
+    dbg($, `photo draw failed: ${err}`)
+  }
+  p.state = 'ready'
+}
+
+// Picture files dropped into the prompt while in a chat: a terminal types the paths, kept here by
+// what it typed, and the engine may turn them into attachments it shrinks. Sent from here, the
+// files go as they are.
+const dropped = new Map<string, string[]>()
+const PICTURE_PATH = /\.(png|jpe?g|gif|webp|heic|heif)$/i
+
+// The paths in what a terminal types for dropped files: each absolute or under ~, spaces escaped
+// with a backslash or the whole path quoted, several apart by spaces.
+function pathsIn(text: string): string[] {
+  const paths: string[] = []
+  let current = ''
+  let quote: string | null = null
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (quote) {
+      if (ch === quote) quote = null
+      else current += ch
+    } else if (ch === '\\' && i + 1 < text.length) current += text[++i]
+    else if (ch === "'" || ch === '"') quote = ch
+    else if (/\s/.test(ch)) {
+      if (current) paths.push(current)
+      current = ''
+    } else current += ch
+  }
+  if (current) paths.push(current)
+  return paths
+}
+
+// A paste of nothing but picture paths, in a chat: they are noted, to send the files themselves.
+async function noteDropped($: $, typed: string) {
+  const words = pathsIn(typed.trim())
+  if (!words.length || !words.every(word => /^[~/]/.test(word) && PICTURE_PATH.test(word))) return
+  dropped.set(typed.trim(), await Promise.all(words.map(word => pathOf($, word))))
+}
+
+// Writes an attached image of the prompt being submitted to a file, slice by slice: it must be read
+// before the submission settles. Null when the engine will not give it.
+async function savePasted($: $, item: PromptSubmitAttachment, n: number): Promise<{ path: string; name: string } | null> {
+  const dir = await photoDir($)
+  const part = `${dir}/pasted-${Date.now()}-${n}`
+  let offset: number | undefined
+  let carry = ''
+  let mediaType = 'image/png'
+  do {
+    const media = await $.prompt.media({ id: item.id!, offset })
+    if (media.unreadable !== undefined || media.deny !== undefined) {
+      dbg($, `pasted picture unreadable: ${media.unreadable ?? media.deny}`)
+      await $.process.run(['rm', '-f', part]).catch(() => undefined)
+      return null
+    }
+    mediaType = media.mediaType
+    // Slices join into one base64 string; each write decodes whole 4-character groups of it.
+    const text = carry + media.base64
+    offset = media.next
+    const whole = offset === undefined ? text.length : text.length - (text.length % 4)
+    carry = text.slice(whole)
+    await $.process.run(['sh', '-c', 'base64 -d >> "$1"', 'sh', part], { stdin: text.slice(0, whole) })
+  } while (offset !== undefined)
+  const ext = (/image\/(png|jpeg|gif|webp|heic)/.exec(mediaType)?.[1] ?? 'png').replace('jpeg', 'jpg')
+  await $.process.run(['mv', part, `${part}.${ext}`])
+  return { path: `${part}.${ext}`, name: item.filename ?? t('the pasted picture', '붙여 넣은 사진') }
+}
+
+// The pictures of a prompt typed in a chat: files dropped in go as they are, pasted ones as the
+// engine holds them. Read now, sent after; the text is what is left to send as a message.
+async function picturesOf($: $, text: string, attachments: readonly PromptSubmitAttachment[]) {
+  const files: { path: string; name: string; isPasted: boolean }[] = []
+  const add = (path: string) => files.some(f => f.path === path) || files.push({ path, name: path.split('/').pop()!, isPasted: false })
+  let rest = text
+  // Still typed out as paths: the engine left them as text.
+  for (const [typed, paths] of dropped) {
+    if (!rest.includes(typed)) continue
+    rest = rest.replace(typed, '')
+    paths.forEach(add)
+  }
+  // Turned into attachments: a dropped file's by its name, a pasted picture's read from the engine.
+  const byName = new Map([...dropped.values()].flat().map(path => [path.split('/').pop()!, path] as const))
+  let n = 0
+  for (const item of attachments) {
+    if (item.type !== 'image' || !item.id) continue
+    const original = item.filename ? byName.get(item.filename) : undefined
+    if (original) add(original)
+    else {
+      const saved = await savePasted($, item, n++)
+      if (saved) files.push({ ...saved, isPasted: true })
+    }
+  }
+  dropped.clear()
+  return { files, text: files.length ? rest.replace(/\[Image #\d+\]/g, '').trim() : text }
+}
+
+async function sendPictures($: $, files: { path: string; name: string; isPasted: boolean }[]) {
+  for (const file of files) {
+    notice($, await sendPhoto($, file.path, file.name))
+    if (file.isPasted) await $.process.run(['rm', '-f', file.path]).catch(() => undefined)
+  }
+}
+
+// Opens a photo's file in the app the system opens pictures with (Preview on macOS).
+async function openPhoto($: $, p: Picture) {
+  if (!p.original) return
+  await $.process.run([(await isMac($)) ? 'open' : 'xdg-open', p.original]).catch(err => dbg($, `photo open failed: ${err}`))
 }
 
 // A path as typed or dropped in: quotes, backslash escapes (a dragged file's spaces) and ~ undone.
@@ -1135,29 +1417,48 @@ async function picture($: $, args: string): Promise<string> {
   if (!chat?.isConnected) return t('Pictures go to a chat or a room: connect first.', '사진은 채팅이나 방으로 보냅니다. 먼저 연결해 주세요.')
   if (args.trim().toLowerCase() === 'paste') return pastePicture($)
   const path = await pathOf($, args)
-  let png: string
+  return sendPhoto($, path, path.split('/').pop() ?? path)
+}
+
+// Sends the picture file at `path` as it is: up to the server, which tells the chat or room.
+async function sendPhoto($: $, path: string, name: string): Promise<string> {
+  let probed: Awaited<ReturnType<typeof probe>>
   try {
-    png = (await $.fs.read(path, { as: 'bytes' })).base64
+    probed = await probe($, path)
   } catch (err) {
     return unreadable(path, String(err))
   }
-  return sendPng($, png, path.split('/').pop() ?? path)
-}
-
-async function sendPng($: $, png: string, name: string): Promise<string> {
-  if (!png.startsWith(PNG_HEAD)) return t('Only PNG pictures for now. A screenshot is one.', '지금은 PNG만 보낼 수 있습니다. 스크린샷은 PNG입니다.')
-  if (png.length > PNG_MAX) return t('A picture is up to 4 MB.', '사진은 4 MB까지 보낼 수 있습니다.')
-  const r = await api($, 'POST', '/pic', { window: await $.session.id(), png })
+  const { format, size, width, height } = probed
+  if (!format) return t('Only pictures: PNG, JPEG, GIF, WebP or HEIC.', '사진만 보낼 수 있습니다: PNG, JPEG, GIF, WebP, HEIC.')
+  if (size > PHOTO_MAX) return t(`A photo is up to 100 MB; this one is ${mbOf(size)}.`, `사진은 100 MB까지 보낼 수 있습니다. 이 사진은 ${mbOf(size)}입니다.`)
+  if (size > 5_000_000) notice($, t(`📤 Sending ${name} (${mbOf(size)})…`, `📤 ${name} (${mbOf(size)}) 보내는 중…`))
+  const query = new URLSearchParams({ window: await $.session.id(), format, width: String(width), height: String(height) })
+  let r: Reply
+  try {
+    r = await curl($, ['-X', 'POST', '-H', `content-type: ${MIME[format]}`, '--data-binary', `@${path}`, `/photo?${query}`])
+  } catch (err) {
+    return t(`Could not send ${name} (${String(err)})`, `${name}을(를) 보내지 못했습니다 (${String(err)})`)
+  }
   if (r.status !== 200) {
     return errorOf(r, {
-      400: t('Only a PNG up to 4 MB.', '4 MB 이하 PNG만 보낼 수 있습니다.'),
+      413: t('A photo is up to 100 MB.', '사진은 100 MB까지 보낼 수 있습니다.'),
       409: String(r.data?.error ?? '').includes('minute') ? t('Up to 6 pictures a minute.', '사진은 1분에 6장까지 보낼 수 있습니다.') : t('Not connected.', '연결되어 있지 않습니다.'),
     })
   }
+  // A copy of its own, as the file sent may be a pasted picture's, about to go.
+  const id = String(r.data?.id ?? '')
+  const original = `${await photoDir($)}/${id}.${EXT[format]}`
+  const copied = await $.process.run(['cp', path, original]).catch(() => null)
   const { value: me } = await $.state.get(ME)
-  await keepPicture($, { from: me ?? 'me', png, at: Date.now(), isStranger: false })
-  const { width, height } = sizeOf(png)
-  return t(`📷 Sent ${name} (${width}×${height}). See it: /knock pic`, `📷 ${name} (${width}×${height})을(를) 보냈습니다. 보기: /knock pic`)
+  const mine: Picture = { from: me ?? 'me', at: Date.now(), isStranger: false, id, format, size, width, height, state: 'loading' }
+  await keepPicture($, mine)
+  if (copied?.exitCode === 0) {
+    mine.original = original
+    void drawPhoto($, mine)
+      .then(() => redrawViewer($))
+      .catch(err => dbg($, `photo draw failed: ${err}`))
+  } else mine.state = 'failed'
+  return t(`📷 Sent ${name} (${aboutOf(mine)}). See it: /knock pic`, `📷 ${name} (${aboutOf(mine)})을(를) 보냈습니다. 보기: /knock pic`)
 }
 
 // AppleScript that writes the clipboard's picture to `<out>.png` (`.tiff` when that is all it holds)
@@ -1185,7 +1486,7 @@ const CLIPBOARD_SCRIPT = [
 ]
 
 // `/knock pic paste`: the clipboard's picture, through a file in the temp folder, which macOS does not
-// guard as it does Desktop, Documents and Downloads. One too big for a read is shrunk to fit.
+// guard as it does Desktop, Documents and Downloads.
 async function pastePicture($: $): Promise<string> {
   const out = `${((await $.env.get('TMPDIR')) ?? '/tmp/').replace(/\/?$/, '/')}knock-paste-${Date.now()}`
   const files = [`${out}.png`, `${out}.tiff`]
@@ -1196,20 +1497,13 @@ async function pastePicture($: $): Promise<string> {
       fmt = r.stdout.trim()
       if (r.exitCode !== 0) return t(`Could not read the clipboard (${r.stderr.trim()})`, `클립보드를 읽지 못했습니다 (${r.stderr.trim()})`)
     } catch {
-      return t('Pasting a picture works on macOS. Send a file instead: /knock pic <path to a PNG>', '사진 붙여 넣기는 macOS에서 됩니다. 파일로 보내기: /knock pic <PNG 경로>')
+      return t('Pasting a picture works on macOS. Send a file instead: /knock pic <path to a picture>', '사진 붙여 넣기는 macOS에서 됩니다. 파일로 보내기: /knock pic <사진 경로>')
     }
     if (fmt !== 'png' && fmt !== 'tiff') {
       return t('No picture in the clipboard. Copy one first (⌘⌃⇧4 captures straight to it).', '클립보드에 사진이 없습니다. 먼저 복사해 주세요 (⌘⌃⇧4로 캡처하면 바로 들어갑니다).')
     }
     if (fmt === 'tiff') await $.process.run(['sips', '-s', 'format', 'png', `${out}.tiff`, '--out', `${out}.png`])
-    // Shrink a picture over what one read takes, its long side to 1920 pixels, then 1280.
-    for (const side of ['1920', '1280']) {
-      const size = Number((await $.process.run(['stat', '-f', '%z', `${out}.png`])).stdout.trim())
-      if (size <= 4 * 1024 * 1024) break
-      await $.process.run(['sips', '-Z', side, `${out}.png`])
-    }
-    const png = (await $.fs.read(`${out}.png`, { as: 'bytes' })).base64
-    return sendPng($, png, t('the copied picture', '복사한 사진'))
+    return await sendPhoto($, `${out}.png`, t('the copied picture', '복사한 사진'))
   } catch (err) {
     return t(`Could not send the copied picture (${String(err)})`, `복사한 사진을 보내지 못했습니다 (${String(err)})`)
   } finally {
@@ -1231,14 +1525,13 @@ function unreadable(path: string, why: string) {
     )
   }
   if (/ENOENT|no such file|not found/i.test(why)) return t(`No such file: ${path}`, `파일이 없습니다: ${path}`)
-  if (/4 ?MiB|too large|over/i.test(why)) return t('A picture is up to 4 MB.', '사진은 4 MB까지 보낼 수 있습니다.')
   return t(`Could not read ${path} (${why})`, `파일을 읽지 못했습니다: ${path} (${why})`)
 }
 
 async function openViewer($: $): Promise<string> {
-  if (!pictures.length) return t('No pictures yet. Send one in a chat: /knock pic <path to a PNG>', '아직 사진이 없습니다. 채팅 중에 보내기: /knock pic <PNG 경로>')
+  if (!pictures.length) return t('No pictures yet. Send one in a chat: /knock pic <path to a picture>', '아직 사진이 없습니다. 채팅 중에 보내기: /knock pic <사진 경로>')
   const { value: viewer } = await $.state.get(VIEWER)
-  await $.state.set(VIEWER, { index: 0, seq: (viewer?.seq ?? 0) + 1, isSharp: false })
+  await $.state.set(VIEWER, { index: 0, seq: (viewer?.seq ?? 0) + 1, isSharp: await isSharpTerminal($) })
   const opened = await $.ui.open({ id: PICTURE_PANE, title: '📷', focus: true, closeOnEscape: true, rows: 24 })
   return opened.isPlaced ? '' : t('Could not open the picture viewer here.', '여기서는 사진 보기 창을 열 수 없습니다.')
 }
@@ -1810,6 +2103,8 @@ export const register: Register = on => {
       await $.store.set(`welcomed:${server}`, true)
       notice($, say(t('🚪 knock is installed.', '🚪 knock이 설치되었습니다.'), t('Start: /knock', '시작: /knock')))
     }
+    // Photos' files over a day old: the server no longer has them either.
+    $.clock.after(0, () => void photoDir($).then(dir => $.process.run(['find', dir, '-type', 'f', '-mtime', '+1', '-delete'])).catch(() => undefined))
     // After a hot reload the chat is still on: pick its poll loop back up.
     const { value: chat } = await $.state.get(CHAT)
     if (chat) {
@@ -2162,44 +2457,54 @@ export const register: Register = on => {
     const { Image, Raster } = table
     const canSharp = await canDrawSharp($)
     const isSharp = canSharp && !!viewer?.isSharp
-    if (!isSharp && shown.thumb === undefined) shown.thumb = thumbOf(shown.png, 240)
+    if (!isSharp && shown.thumb === undefined && shown.png) shown.thumb = thumbOf(shown.png, THUMB_SIDE)
+    const [width, height] = [Math.max(1, shown.width), Math.max(1, shown.height)]
     const older = index + 1 < pictures.length
     const newer = index > 0
     // A terminal cell is about twice as tall as wide; the rows left after the caption and the keys.
     const room = Math.max(1, e.props.scroll.bodyRows - 2 - (older ? 1 : 0) - (newer ? 1 : 0))
     let columns = Math.max(1, Math.min(e.props.bodyColumns, 120, isSharp ? 120 : (shown.thumb?.width ?? 120)))
-    let rows = Math.max(1, Math.round((columns * shown.height) / shown.width / 2))
+    let rows = Math.max(1, Math.round((columns * height) / width / 2))
     if (rows > room) {
       rows = room
-      columns = Math.max(1, Math.min(columns, Math.round((rows * 2 * shown.width) / shown.height)))
+      columns = Math.max(1, Math.min(columns, Math.round((rows * 2 * width) / height)))
     }
     const time = new Date(shown.at).toTimeString().slice(0, 5)
-    const picture = isSharp ? (
-      shown.png.length <= SHARP_MAX ? (
-        <Image
-          key={`sharp-${shown.at}-${shown.from}`}
-          source={{ png: shown.png }}
-          columns={columns}
-          rows={rows}
-          alt={t('This terminal does not draw sharp pictures: press g for the block view', '이 터미널은 선명한 사진을 그리지 못합니다: g로 블록 보기')}
-        />
+    const canOpen = !!shown.original && shown.state === 'ready'
+    const openHint = canOpen ? t(' Press f to open the file.', ' f로 파일을 열 수 있습니다.') : ''
+    const sharpPng = shown.png && shown.png.length <= SHARP_MAX ? shown.png : null
+    const picture =
+      shown.state === 'loading' ? (
+        <Text dimColor>{t(`⏳ Getting the photo${shown.size ? ` (${mbOf(shown.size)})` : ''}…`, `⏳ 사진 받는 중${shown.size ? ` (${mbOf(shown.size)})` : ''}…`)}</Text>
+      ) : shown.state === 'failed' ? (
+        <Text dimColor>{t('Could not get this photo. Photos are kept a day.', '이 사진을 받지 못했습니다. 사진은 하루 동안만 보관됩니다.')}</Text>
+      ) : isSharp ? (
+        shown.view || sharpPng ? (
+          <Image
+            key={`sharp-${shown.id ?? shown.at}-${shown.from}`}
+            source={shown.view ? { file: shown.view, format: 'png' } : { png: sharpPng! }}
+            columns={columns}
+            rows={rows}
+            alt={t('This terminal does not draw sharp pictures: press g for the block view', '이 터미널은 선명한 사진을 그리지 못합니다: g로 블록 보기')}
+          />
+        ) : (
+          <Text dimColor>{t(`The sharp view cannot draw this one.${openHint}`, `이 사진은 선명하게 볼 수 없습니다.${openHint}`)}</Text>
+        )
+      ) : shown.thumb ? (
+        <Raster key={`blocks-${shown.id ?? shown.at}-${shown.from}`} columns={columns} rows={rows} cells={cellsOf(shown.thumb, columns, rows)} />
       ) : (
-        <Text dimColor>{t('Over 2 MB: the sharp view cannot draw it. Press g for the block view.', '2 MB가 넘어 선명하게 볼 수 없습니다. g로 블록 보기.')}</Text>
+        <Text dimColor>{t(`This picture cannot be drawn in blocks here.${openHint}`, `이 사진은 여기서 블록으로 그릴 수 없습니다.${openHint}`)}</Text>
       )
-    ) : shown.thumb ? (
-      <Raster key={`blocks-${shown.at}-${shown.from}`} columns={columns} rows={rows} cells={cellsOf(shown.thumb, columns, rows)} />
-    ) : (
-      <Text dimColor>{t('This picture could not be read (an interlaced or broken PNG).', '이 사진은 읽을 수 없습니다 (인터레이스이거나 깨진 PNG).')}</Text>
-    )
     return (
       <Box flexDirection="column">
         <Text>
-          {`📷 ${shown.from} · ${time} · ${shown.width}×${shown.height}`}
+          {`📷 ${shown.from} · ${time}${aboutOf(shown) ? ` · ${aboutOf(shown)}` : ''}`}
           <Text dimColor>{` · ${index + 1}/${pictures.length} · Esc ${t('closes', '닫기')}`}</Text>
         </Text>
         {picture}
         {older && <Button key="older" plain hotkey="o" autoFocus label={t('older picture', '이전 사진')} onPress={() => void showPicture($, index + 1)} />}
         {newer && <Button key="newer" plain hotkey="n" autoFocus={older ? undefined : true} label={t('newer picture', '다음 사진')} onPress={() => void showPicture($, index - 1)} />}
+        {canOpen && <Button key="open" plain hotkey="f" label={t('open the file', '파일로 열기')} onPress={() => void openPhoto($, shown)} />}
         {/* Never focused first: an Enter meant for something else would switch the view. */}
         {canSharp && (
           <Button
@@ -2238,6 +2543,14 @@ export const register: Register = on => {
 
   // While connected, what the person types goes to the peer as well as into the transcript;
   // the turn it starts is answered by the peer, not the model.
+  // A paste in a chat may be files dropped in: noted, so the files themselves are sent.
+  on('prompt.edit', async ($, e, next) => {
+    if (!e.key && e.inputText.includes('/') && (await $.state.get(CHAT)).value?.isConnected) {
+      await noteDropped($, e.inputText).catch(err => dbg($, `drop check failed: ${err}`))
+    }
+    return next(e)
+  })
+
   on('prompt.submit', async ($, e, next) => {
     submissions++
     activeAt = Date.now()
@@ -2270,7 +2583,9 @@ export const register: Register = on => {
       return next({ ...e, context: [...(e.context ?? []), relayNote(relayed, strangers)] })
     }
 
-    const r = await api($, 'POST', '/send', { window: await $.session.id(), text: e.text })
+    const { files, text } = await picturesOf($, e.text, e.attachments ?? [])
+    if (files.length) void sendPictures($, files).catch(err => dbg($, `pictures not sent: ${err}`))
+    const r = text ? await api($, 'POST', '/send', { window: await $.session.id(), text }) : { status: 200, data: { to: ['-'] } }
     if (r.status !== 200) {
       if (r.status === 409) await endChat($)
       const why = errorOf(r, {
@@ -2283,7 +2598,7 @@ export const register: Register = on => {
       notice($, t('No one else is in the room yet, so no one got it.', '아직 방에 아무도 없어 전달되지 않았습니다.'))
     }
     const { value: me } = await $.state.get(ME)
-    remember(me ?? 'me', e.text)
+    if (text) remember(me ?? 'me', text)
     void offerStar($).catch(err => dbg($, `star offer failed: ${err}`))
     pendingTurns.push(e.text)
     const submitted = await next(e)
@@ -2293,7 +2608,7 @@ export const register: Register = on => {
       void $.turn.abort({ turnId: e.turnId }).catch(err => dbg($, `abort failed: ${err}`))
     }
     // Once that turn is gone: a model call is cut when the turn running beside it is aborted.
-    if (me && ASK.test(e.text)) $.clock.after(300, () => void askClaude($, me, chat))
+    if (me && ASK.test(text)) $.clock.after(300, () => void askClaude($, me, chat))
     return submitted
   }).catch(($, e, next) => (next.called ? next(e) : { drop: `knock: ${t('Could not send. Try again.', '메시지를 보내지 못했습니다. 다시 보내 주세요.')}` }))
 

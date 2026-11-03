@@ -15,6 +15,9 @@ export type Chat = {
   seen?: string[]
 }
 
+export type PhotoFormat = 'png' | 'jpeg' | 'gif' | 'webp' | 'heic'
+export type Photo = { id: string; format: PhotoFormat; size: number; width: number; height: number }
+
 // What the server's /poll hands back, as server/src/hub.ts defines it.
 export type KnockEvent =
   | { type: 'connected'; peer: string; isRandom?: boolean }
@@ -22,6 +25,8 @@ export type KnockEvent =
   | { type: 'message'; from: string; text: string; at: number; group?: string; color?: string; isClaude?: true }
   | { type: 'left'; peer: string; reason: 'left' | 'closed' | 'timeout' }
   | { type: 'picture'; from: string; png: string; at: number; group?: string }
+  // A photo: any picture file as sent, its bytes at GET /photo/:id.
+  | ({ type: 'photo'; from: string; at: number; group?: string } & Photo)
   | { type: 'joined'; name: string; count: number }
   | { type: 'departed'; name: string; count: number; reason: 'left' | 'timeout' }
   | { type: 'replaced' }

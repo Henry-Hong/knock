@@ -8,6 +8,9 @@
     "bindings": [{ "name": "HUB", "class_name": "Hub" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  // Photos, as sent, for whoever they went to. A lifecycle rule on the bucket deletes each after a day:
+  // npx wrangler r2 bucket lifecycle add knock-photos expire-after-a-day --expire-days 1
+  "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "knock-photos" }],
   // Per minute. IP_LIMIT covers every request and leaves room for an office behind one IP;
   // USER_LIMIT is what one person does (sends, knocks); a poll paces itself and is left to IP_LIMIT.
   "ratelimits": [
