@@ -1401,7 +1401,7 @@ async function picturesOf($: $, text: string, attachments: readonly PromptSubmit
   // Still typed out as paths: the engine left them as text.
   for (const [typed, paths] of dropped) {
     if (!rest.includes(typed)) continue
-    rest = rest.replace(typed, '')
+    rest = rest.split(typed).join('')
     paths.forEach(add)
   }
   // Turned into attachments: a dropped file's by its name, a pasted picture's read from the engine.
@@ -2679,7 +2679,8 @@ export const register: Register = on => {
     }
 
     const { files, text } = await picturesOf($, e.text, e.attachments ?? [])
-    if (files.length) void sendPictures($, files).catch(err => dbg($, `pictures not sent: ${err}`))
+    // After the hook: what it starts is stopped as the submission settles.
+    if (files.length) $.clock.after(0, () => void sendPictures($, files).catch(err => dbg($, `pictures not sent: ${err}`)))
     const r = text ? await api($, 'POST', '/send', { window: await $.session.id(), text }) : { status: 200, data: { to: ['-'] } }
     if (r.status !== 200) {
       if (r.status === 409) await endChat($)
@@ -2762,6 +2763,9 @@ export const register: Register = on => {
           // What Claude reads later: in a room, who said each line.
           said.push(m.isClaude ? `claude (asked by ${m.from}): ${m.text}` : m.group ? `${m.from}: ${m.text}` : m.text)
         }
+        // A picture is drawn under its line once the reply is a message of the transcript, which it
+        // becomes as the turn ends: end it here, and the next word opens a turn of its own.
+        if (messages.some(m => pictures.some(p => p.line === m.text))) break
       }
     } finally {
       steppingTurn = null
