@@ -163,6 +163,7 @@ In a chat or a room, paste a picture into the prompt or drop picture files on it
 ⏺ bob 📷 sent a picture · see it: /knock pic
 ```
 
+- A picture shows right in the chat, under the line that says it came, 40 columns wide: sharp where the terminal draws pictures, in colored blocks elsewhere. Click **🔍 bigger** under it, or type `/knock pic`, for the viewer. One from someone met at random doesn't: open it with `/knock pic` if you trust them.
 - `/knock pic` opens a viewer with the latest pictures, newest first: `o` older, `n` newer, `f` opens the file (in Preview on macOS), `Esc` closes.
 - In a terminal that draws pictures (iTerm2 3.5 and later, Ghostty, kitty) the viewer opens on the sharp picture; `g` switches to colored blocks and back. Other terminals, Orca or Apple's Terminal among them, get the blocks, which work anywhere.
 - A picture goes as it is, up to 100 MB: PNG, JPEG, GIF, WebP or HEIC. 6 a minute. Turning HEIC and the rest into what the terminal draws takes macOS (`sips`); elsewhere a PNG shows, and `f` opens the others.

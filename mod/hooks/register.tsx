@@ -1,5 +1,5 @@
 import { update } from 'claude-code'
-import type { EngineInterface, PromptAutocompleteSuggestion, PromptSubmitAttachment, Register } from 'claude-code'
+import type { EngineInterface, ImageSource, PromptAutocompleteSuggestion, PromptSubmitAttachment, Register } from 'claude-code'
 
 import type { Chat, KnockEvent, Menu, MenuStep, PhotoFormat } from '../types'
 
@@ -87,9 +87,13 @@ type Picture = {
   original?: string
   // What the sharp view draws, a PNG at most VIEW_SIDE pixels long; null when none could be made.
   view?: string | null
+  // A PNG of it under 2 MiB, base64: iTerm2 draws bytes, not a file.
+  small?: string | null
   // 'loading' while it comes down; 'failed' when it could not.
   state?: 'loading' | 'ready' | 'failed'
   thumb?: Thumb | null
+  // The transcript line that says it came or went: the picture is drawn under the row holding it.
+  line?: string
 }
 let pictures: Picture[] = []
 let stopWaiting: (() => void) | null = null
@@ -447,7 +451,8 @@ async function take($: $, events: KnockEvent[]) {
       const about = aboutOf(shown)
       const text = isStranger
         ? t(`📷 sent a photo (${about}) · a stranger's: see it only if you trust them: /knock pic`, `📷 사진을 보냈습니다 (${about}) · 모르는 사람의 사진이니 믿을 때만 보세요: /knock pic`)
-        : t(`📷 sent a photo (${about}) · see it: /knock pic`, `📷 사진을 보냈습니다 (${about}) · 보기: /knock pic`)
+        : t(`📷 sent a photo (${about})`, `📷 사진을 보냈습니다 (${about})`)
+      if (!isStranger) shown.line = text
       remember(event.from, '(a picture)')
       inbox.push({ type: 'message', from: event.from, text, at: event.at, group })
     } else await onEvent($, event)
@@ -1116,6 +1121,15 @@ async function canDrawSharp($: $) {
   return !(await $.env.get('TERM_PROGRAM')) || (await isSharpTerminal($))
 }
 
+// What an Image draws of a picture: kitty and Ghostty read a file, iTerm2 and tmux take bytes (2 MiB
+// at most). Null when there is nothing it can draw.
+async function sharpOf($: $, p: Picture): Promise<ImageSource | null> {
+  const program = (await $.env.get('TERM_PROGRAM')) ?? ''
+  const bytes = p.small ?? (p.png && p.png.length <= SHARP_MAX ? p.png : null)
+  if (p.view && !['iTerm.app', 'tmux'].includes(program)) return { file: p.view, format: 'png' }
+  return bytes ? { png: bytes } : null
+}
+
 // A terminal that names itself as one that draws sharp pictures: the viewer opens on the sharp view.
 async function isSharpTerminal($: $) {
   const program = (await $.env.get('TERM_PROGRAM')) ?? ''
@@ -1158,8 +1172,11 @@ async function keepPicture($: $, picture: Picture) {
   await update($, VIEWER, viewer => (viewer ? { ...viewer, index: viewer.index ? viewer.index + 1 : 0, seq: viewer.seq + 1 } : null))
 }
 
-// A picture's change of state shows in an open viewer.
-const redrawViewer = ($: $) => update($, VIEWER, viewer => (viewer ? { ...viewer, seq: viewer.seq + 1 } : null))
+// A picture's change of state shows in an open viewer, and under its line in the transcript.
+const redrawViewer = async ($: $) => {
+  $.ui.invalidate('ui.render')
+  await update($, VIEWER, viewer => (viewer ? { ...viewer, seq: viewer.seq + 1 } : null))
+}
 
 // A photo is any picture file as it is, up to 100 MB (what the server takes). curl carries it up and
 // down, as $.fs.read and $.http.fetch hold 4 MiB and text; on macOS sips draws PNGs of it to show.
@@ -1175,6 +1192,7 @@ const EXT: Record<PhotoFormat, string> = { png: 'png', jpeg: 'jpg', gif: 'gif', 
 // The sharp view draws a PNG of a photo this many pixels on its long side at most.
 const VIEW_SIDE = 2560
 const THUMB_SIDE = 240
+const SMALL_SIDES = [1280, 960, 720, 480]
 const FS_READ_MAX = 4 * 1024 * 1024
 
 const mbOf = (bytes: number) => (bytes < 1_000_000 ? `${Math.max(1, Math.round(bytes / 1000))} KB` : `${(bytes / 1_000_000).toFixed(1)} MB`)
@@ -1286,11 +1304,24 @@ async function drawPhoto($: $, p: Picture) {
         if (!p.width || !p.height) Object.assign(p, await probe($, view).then(({ width, height }) => ({ width, height })))
         await $.process.run(['sips', '-s', 'format', 'png', ...shrink(THUMB_SIDE), view, '--out', thumb], { timeoutMs: 60_000 })
         p.thumb = thumbOf((await $.fs.read(thumb, { as: 'bytes' })).base64, THUMB_SIDE)
+        // Smaller until it is under the 2 MiB an Image takes as bytes.
+        for (const side of SMALL_SIDES) {
+          await $.process.run(['sips', '-s', 'format', 'png', ...shrink(side), view, '--out', thumb], { timeoutMs: 60_000 })
+          const { base64 } = await $.fs.read(thumb, { as: 'bytes' })
+          if (base64.length <= SHARP_MAX) {
+            p.small = base64
+            break
+          }
+        }
         await $.process.run(['rm', '-f', thumb])
       }
     } else if (p.format === 'png') {
       p.view = original
-      if ((p.size ?? Infinity) <= FS_READ_MAX) p.thumb = thumbOf((await $.fs.read(original, { as: 'bytes' })).base64, THUMB_SIDE)
+      if ((p.size ?? Infinity) <= FS_READ_MAX) {
+        const { base64 } = await $.fs.read(original, { as: 'bytes' })
+        p.thumb = thumbOf(base64, THUMB_SIDE)
+        if (base64.length <= SHARP_MAX) p.small = base64
+      }
     }
   } catch (err) {
     dbg($, `photo draw failed: ${err}`)
@@ -1396,6 +1427,63 @@ async function sendPictures($: $, files: { path: string; name: string; isPasted:
   }
 }
 
+// How wide a picture under its line is drawn, in columns; and how tall at most, in rows.
+const INLINE_COLUMNS = 40
+const INLINE_ROWS = 16
+
+// The drawing `drawn` of a transcript row, with the pictures its text tells of drawn under it.
+async function withInline($: $, e: Parameters<$['ui']['resolve']>[0] & { viewport?: { columns?: number } }, text: string, drawn: any) {
+  const shown = pictures.filter(p => p.line && text.includes(p.line))
+  if (!shown.length) return drawn
+  const table = $.ui.resolve(e) as any
+  if (!('Image' in table) || !('Raster' in table)) return drawn
+  const { Box, Text, Image, Raster, Button } = table
+  const isSharp = await isSharpTerminal($)
+  const room = Math.max(10, (e.viewport?.columns ?? 80) - 4)
+  const sharps = new Map(await Promise.all(shown.map(async p => [p, isSharp ? await sharpOf($, p) : null] as const)))
+  // Under each picture: a click opens it in the viewer, as /knock pic does.
+  const bigger = (p: Picture) => (
+    <Button
+      key={`bigger-${p.id ?? p.at}-${p.from}`}
+      plain
+      dimColor
+      label={t('🔍 bigger (/knock pic)', '🔍 크게 보기 (/knock pic)')}
+      onPress={() => void openViewer($, pictures.indexOf(p)).catch(err => dbg($, `viewer failed: ${err}`))}
+    />
+  )
+  const drawOne = (p: Picture) => {
+    const key = `inline-${p.id ?? p.at}-${p.from}`
+    if (p.state === 'loading') return <Text key={key} dimColor>{`  ⏳ ${t('getting the photo…', '사진 받는 중…')}`}</Text>
+    if (p.state === 'failed') return <Text key={key} dimColor>{`  ${t('could not get this photo', '사진을 받지 못했습니다')}`}</Text>
+    const [width, height] = [Math.max(1, p.width), Math.max(1, p.height)]
+    let columns = Math.min(INLINE_COLUMNS, room)
+    let rows = Math.max(1, Math.round((columns * height) / width / 2))
+    if (rows > INLINE_ROWS) {
+      rows = INLINE_ROWS
+      columns = Math.max(1, Math.min(columns, Math.round((rows * 2 * width) / height)))
+    }
+    const sharp = sharps.get(p)
+    if (p.thumb === undefined && p.png) p.thumb = thumbOf(p.png, THUMB_SIDE)
+    const picture = sharp ? (
+      <Image key={key} source={sharp} columns={columns} rows={rows} alt={t('a photo', '사진')} />
+    ) : p.thumb ? (
+      <Raster key={key} columns={columns} rows={rows} cells={cellsOf(p.thumb, columns, rows)} />
+    ) : null
+    return (
+      <Box key={`box-${key}`} flexDirection="column">
+        {picture}
+        {bigger(p)}
+      </Box>
+    )
+  }
+  return (
+    <Box flexDirection="column">
+      {drawn}
+      {shown.map(drawOne)}
+    </Box>
+  )
+}
+
 // Opens a photo's file in the app the system opens pictures with (Preview on macOS).
 async function openPhoto($: $, p: Picture) {
   if (!p.original) return
@@ -1458,7 +1546,8 @@ async function sendPhoto($: $, path: string, name: string): Promise<string> {
       .then(() => redrawViewer($))
       .catch(err => dbg($, `photo draw failed: ${err}`))
   } else mine.state = 'failed'
-  return t(`📷 Sent ${name} (${aboutOf(mine)}). See it: /knock pic`, `📷 ${name} (${aboutOf(mine)})을(를) 보냈습니다. 보기: /knock pic`)
+  mine.line = t(`📷 Sent ${name} (${aboutOf(mine)})`, `📷 ${name} (${aboutOf(mine)})을(를) 보냈습니다`)
+  return mine.line
 }
 
 // AppleScript that writes the clipboard's picture to `<out>.png` (`.tiff` when that is all it holds)
@@ -1528,10 +1617,10 @@ function unreadable(path: string, why: string) {
   return t(`Could not read ${path} (${why})`, `파일을 읽지 못했습니다: ${path} (${why})`)
 }
 
-async function openViewer($: $): Promise<string> {
+async function openViewer($: $, index = 0): Promise<string> {
   if (!pictures.length) return t('No pictures yet. Send one in a chat: /knock pic <path to a picture>', '아직 사진이 없습니다. 채팅 중에 보내기: /knock pic <사진 경로>')
   const { value: viewer } = await $.state.get(VIEWER)
-  await $.state.set(VIEWER, { index: 0, seq: (viewer?.seq ?? 0) + 1, isSharp: await isSharpTerminal($) })
+  await $.state.set(VIEWER, { index: Math.max(0, index), seq: (viewer?.seq ?? 0) + 1, isSharp: await isSharpTerminal($) })
   const opened = await $.ui.open({ id: PICTURE_PANE, title: '📷', focus: true, closeOnEscape: true, rows: 24 })
   return opened.isPlaced ? '' : t('Could not open the picture viewer here.', '여기서는 사진 보기 창을 열 수 없습니다.')
 }
@@ -2443,6 +2532,12 @@ export const register: Register = on => {
     )
   })
 
+  // A picture drawn right under the line that says it came (from a friend: a stranger's waits for
+  // /knock pic) or went: the peer's in the chat turn's answer, one's own in a notice or a command's row.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => withInline($, e, e.props.text, await next(e)))
+  on('ui.render', { component: 'InfoNotice' }, async ($, e, next) => withInline($, e, e.props.text, await next(e)))
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => withInline($, e, e.props.text, await next(e)))
+
   // The picture viewer: the picture drawn in colored block cells, which any terminal shows, or on g
   // the sharp picture, which only terminals with graphics (iTerm2, Ghostty, kitty) draw.
   on('ui.render', { component: 'Pane', requestId: PICTURE_PANE }, async ($, e) => {
@@ -2472,17 +2567,17 @@ export const register: Register = on => {
     const time = new Date(shown.at).toTimeString().slice(0, 5)
     const canOpen = !!shown.original && shown.state === 'ready'
     const openHint = canOpen ? t(' Press f to open the file.', ' f로 파일을 열 수 있습니다.') : ''
-    const sharpPng = shown.png && shown.png.length <= SHARP_MAX ? shown.png : null
+    const sharp = await sharpOf($, shown)
     const picture =
       shown.state === 'loading' ? (
         <Text dimColor>{t(`⏳ Getting the photo${shown.size ? ` (${mbOf(shown.size)})` : ''}…`, `⏳ 사진 받는 중${shown.size ? ` (${mbOf(shown.size)})` : ''}…`)}</Text>
       ) : shown.state === 'failed' ? (
         <Text dimColor>{t('Could not get this photo. Photos are kept a day.', '이 사진을 받지 못했습니다. 사진은 하루 동안만 보관됩니다.')}</Text>
       ) : isSharp ? (
-        shown.view || sharpPng ? (
+        sharp ? (
           <Image
             key={`sharp-${shown.id ?? shown.at}-${shown.from}`}
-            source={shown.view ? { file: shown.view, format: 'png' } : { png: sharpPng! }}
+            source={sharp}
             columns={columns}
             rows={rows}
             alt={t('This terminal does not draw sharp pictures: press g for the block view', '이 터미널은 선명한 사진을 그리지 못합니다: g로 블록 보기')}
